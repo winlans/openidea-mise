@@ -1,0 +1,20 @@
+[tools]
+node = "22"
+
+[env]
+PUBLIC_VALUE = "visible"
+API_TOKEN = "top-secret"
+
+[tasks.lint]
+description = "Check formatting"
+run = "echo lint"
+
+[tasks.build]
+description = "Build the project"
+depends = ["lint"]
+run = "echo build"
+
+[tasks.test]
+description = "Run tests"
+depends = ["build"]
+run = "echo test"

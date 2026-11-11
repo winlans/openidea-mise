@@ -1,0 +1,61 @@
+id = "winlans.mise"
+name = "Mise"
+version = "0.1.0"
+description = "Run mise tasks, inspect tools and environment, and execute project runs through mise."
+authors = ["winlans <winlans@outlook.com>"]
+homepage = "https://github.com/winlans/openidea-mise"
+license = "Apache-2.0"
+change-notes = "0.1.0 — first OpenIDEA port with tasks, tools, environment and run integration."
+categories = ["tools"]
+engines.openidea = "^1.4"
+wasm = "dist/plugin.wasm"
+activation = [
+  "on-view:mise",
+  "on-command:*",
+  "on-event:file-saved",
+  "on-event:files-changed",
+  "on-event:settings-changed",
+]
+
+[capabilities]
+required = ["project.read", "storage", "events"]
+optional = ["process:mise"]
+
+[[contributes.commands]]
+id = "show"
+title = "Mise: Show Tool Window"
+category = "Mise"
+
+[[contributes.commands]]
+id = "refresh"
+title = "Mise: Refresh Project"
+category = "Mise"
+
+[[contributes.commands]]
+id = "run-task"
+title = "Mise: Run Task"
+category = "Mise"
+
+[[contributes.views]]
+id = "mise"
+title = "Mise"
+icon = "run"
+location = "bottom"
+
+[[contributes.runConfigurations]]
+files = ["mise.toml", ".mise.toml", "mise.local.toml", ".mise.local.toml"]
+
+[[contributes.providers]]
+kinds = ["completion", "definition", "hover"]
+languages = ["toml"]
+
+[[contributes.providers]]
+kinds = ["gutter-actions", "injections"]
+languages = ["toml"]
+
+[[contributes.documentIndexers]]
+extensions = ["toml"]
+
+[contributes.settings]
+title = "Mise"
+schema = "settings.schema.json"

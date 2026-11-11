@@ -1,0 +1,170 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild and republish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.98.1
+  OPENIDEA_CLI_VERSION: 0.1.40
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - name: Run Release Please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    needs: release-please
+    if: >-
+      ${{
+        always() &&
+        (
+          needs.release-please.outputs.release_created == 'true' ||
+          github.event_name == 'workflow_dispatch'
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: release
+
+    steps:
+      - name: Resolve release metadata
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
+        run: |
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "release tag must look like v1.2.3: $RELEASE_TAG" >&2
+              exit 1
+              ;;
+          esac
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out released source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup target add wasm32-wasip2 --toolchain "$RUST_TOOLCHAIN"
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Install OpenIDEA plugin CLI
+        run: scripts/install-openidea-plugin.sh
+
+      - name: Restore publisher signing key
+        env:
+          SIGNING_KEY_B64: ${{ secrets.OPENIDEA_PLUGIN_SIGNING_KEY_B64 }}
+        run: |
+          test -n "$SIGNING_KEY_B64"
+          mkdir -p "$RUNNER_TEMP/openidea-mise"
+          printf '%s' "$SIGNING_KEY_B64" | base64 --decode > "$RUNNER_TEMP/openidea-mise/signing.key"
+          chmod 0600 "$RUNNER_TEMP/openidea-mise/signing.key"
+
+      - name: Build, sign, and check package
+        id: package
+        env:
+          OPENIDEA_PLUGIN_BIN: .tools/openidea-plugin
+          OPENIDEA_SIGNING_KEY_FILE: ${{ runner.temp }}/openidea-mise/signing.key
+        run: scripts/build-package.sh "${{ steps.release.outputs.version }}"
+
+      - name: Upload package to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.release.outputs.tag }}" \
+            "${{ steps.package.outputs.package_path }}" \
+            "${{ steps.package.outputs.checksum_path }}" \
+            --clobber
+
+      - name: Check out community registry
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN"
+          gh auth setup-git
+          if ! gh repo view winlans/openidea-plugins >/dev/null 2>&1; then
+            gh repo fork l0ng-ai/openidea-plugins --clone=false
+          fi
+          git clone https://github.com/l0ng-ai/openidea-plugins.git "$RUNNER_TEMP/openidea-plugins"
+          git -C "$RUNNER_TEMP/openidea-plugins" remote add fork https://github.com/winlans/openidea-plugins.git
+          git -C "$RUNNER_TEMP/openidea-plugins" checkout -B automation/winlans-mise origin/main
+
+      - name: Update registry files
+        id: registry
+        run: |
+          result="$(python3 scripts/update_registry.py \
+            --registry "$RUNNER_TEMP/openidea-plugins" \
+            --version "${{ steps.release.outputs.version }}" \
+            --package "${{ steps.package.outputs.package_path }}" \
+            --sha256 "${{ steps.package.outputs.sha256 }}")"
+          echo "$result"
+          echo "$result" >> "$GITHUB_OUTPUT"
+
+      - name: Push registry branch and open pull request
+        if: ${{ steps.registry.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          registry="$RUNNER_TEMP/openidea-plugins"
+          branch="automation/winlans-mise"
+          git -C "$registry" config user.name "openidea-mise-release"
+          git -C "$registry" config user.email "openidea-mise-release@users.noreply.github.com"
+          git -C "$registry" add publishers/winlans.toml plugins/winlans.mise.toml
+          git -C "$registry" commit -m "chore: publish winlans.mise $VERSION"
+          git -C "$registry" push --force fork "HEAD:refs/heads/$branch"
+
+          existing="$(gh pr list \
+            --repo l0ng-ai/openidea-plugins \
+            --head "winlans:$branch" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+          title="chore: publish winlans.mise $VERSION"
+          body="Automated registry update for winlans.mise $VERSION.
+
+          Source release: https://github.com/winlans/openidea-mise/releases/tag/v$VERSION"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --repo l0ng-ai/openidea-plugins --title "$title" --body "$body"
+          else
+            gh pr create \
+              --repo l0ng-ai/openidea-plugins \
+              --base main \
+              --head "winlans:$branch" \
+              --title "$title" \
+              --body "$body"
+          fi

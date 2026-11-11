@@ -1,0 +1,22 @@
+{
+  "properties": {
+    "autoRefreshSeconds": {
+      "type": "integer",
+      "title": "Auto-refresh interval",
+      "description": "Refresh the visible Mise tool window at this interval. Set to 0 to disable.",
+      "default": 30
+    },
+    "redactEnvironment": {
+      "type": "boolean",
+      "title": "Redact sensitive environment values",
+      "description": "Mask values whose names look like passwords, tokens, keys, cookies or credentials.",
+      "default": true
+    },
+    "registerRunTarget": {
+      "type": "boolean",
+      "title": "Offer Mise as a run target",
+      "description": "Make the mise exec wrapper available in the Run Target selector.",
+      "default": true
+    }
+  }
+}

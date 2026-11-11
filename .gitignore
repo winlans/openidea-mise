@@ -1,0 +1,10 @@
+/target/
+/dist/
+/.tools/
+/.idea/
+/.vscode/
+*.key
+*.oiplugin
+*.sha256
+__pycache__/
+.DS_Store
