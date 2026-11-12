@@ -130,6 +130,9 @@ Registry entry 固定为 `plugins/winlans.mise.toml`，首个版本同时注册
   需要仓库创建后配置。
 - 阶段 1：Tasks、Tools、Environment 工具窗口、脱敏、缓存和动态 Run
   Configuration 已实现。
+- 工具窗口已迁移为包内静态 Web View（`web/index.html`）。页面通过
+  `openidea.postMessage` / `openidea.onMessage` 与 Wasm 后端交换快照，
+  使用 `header = "none"` 去除重复的宿主标题行，并把刷新操作放在页签栏。
 - 阶段 2：Mise TOML 补全、Hover、跳转、索引 Rename/Find Usages、Run gutter
   和 Shell 注入已实现。
 - 阶段 3：可选 `mise.exec` Run Target 已实现。
@@ -140,6 +143,12 @@ Registry entry 固定为 `plugins/winlans.mise.toml`，首个版本同时注册
 OpenIDEA v0.1.40 `openidea-plugin check` 和临时密钥签名包 smoke test
 均已通过。真实签名包已验证包含 `SIGNATURE.json`，registry 更新脚本也已通过
 首次写入与幂等重跑测试；CI 同样覆盖该真实签名包到 registry 的完整路径。
+
+在 OpenIDEA 0.1.42 的桌面安装测试中，原先由 `Body::Html` 返回的内联页面没有
+执行脚本，导致面板停在 Waiting/Starting 状态。当前实现改用 OpenIDEA 的静态
+Web View 加载路径，并已用真实消息桥形态验证任务和工具快照能够渲染。Mise
+图标继续使用官方 SVG 路径数据，颜色继承放在图标内容节点，以适配 OpenIDEA
+外部 SVG 的提取方式。
 
 官方 CLI 的隔离目录 `link → links → unlink` 本地安装注册测试也已通过。当前
 自动化执行环境没有 GTK display，工具窗口、命令和编辑器交互仍需在桌面

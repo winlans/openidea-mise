@@ -1,4 +1,10 @@
-<style>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mise</title>
+  <style>
     :root { color-scheme: light dark; }
     * { box-sizing: border-box; }
     body {
@@ -9,17 +15,19 @@
     }
     button, input { font: inherit; }
     .shell { display: grid; grid-template-rows: auto 1fr auto; min-height: 100vh; }
-    .run, .reveal {
+    .refresh, .run, .reveal {
       border: 1px solid var(--openidea-border); border-radius: 5px;
       background: var(--openidea-bg-elevated); color: var(--openidea-fg);
       padding: 4px 9px; cursor: pointer;
     }
-    .run:hover, .reveal:hover { background: var(--openidea-bg-hover); }
-    .run:focus-visible, .reveal:focus-visible, input:focus-visible {
+    .refresh:hover, .run:hover, .reveal:hover { background: var(--openidea-bg-hover); }
+    .refresh:focus-visible, .run:focus-visible, .reveal:focus-visible, input:focus-visible {
       outline: 2px solid var(--openidea-focus-ring); outline-offset: 1px;
     }
     .tabs {
-      display: flex; gap: 2px; padding: 6px 10px 0;
+      display: flex; align-items: center; gap: 2px;
+      min-height: var(--openidea-corner-inset-height, 0);
+      padding: 6px calc(10px + var(--openidea-corner-inset-width, 0px)) 0 10px;
       border-bottom: 1px solid var(--openidea-border);
     }
     .tab {
@@ -27,6 +35,8 @@
       color: var(--openidea-fg-muted); padding: 6px 10px; cursor: pointer;
     }
     .tab.active { color: var(--openidea-fg-strong); border-bottom-color: var(--openidea-accent); }
+    .tabs-spacer { flex: 1; }
+    .refresh { margin: 0 0 5px 8px; padding: 3px 8px; }
     .content { min-height: 0; overflow: auto; padding: 10px; }
     .toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
     input {
@@ -108,13 +118,17 @@
     @media (max-width: 720px) {
       .graph-details { grid-template-columns: 1fr; }
     }
-  </style>
+</style>
+</head>
+<body>
   <main class="shell">
     <nav class="tabs" aria-label="Mise sections">
       <button class="tab active" data-tab="tasks" type="button">Tasks <span id="task-count"></span></button>
       <button class="tab" data-tab="graph" type="button">Graph</button>
       <button class="tab" data-tab="tools" type="button">Tools <span id="tool-count"></span></button>
       <button class="tab" data-tab="environment" type="button">Environment <span id="env-count"></span></button>
+      <span class="tabs-spacer"></span>
+      <button id="refresh" class="refresh" type="button">Refresh</button>
     </nav>
     <section class="content">
       <div id="search-bar" class="toolbar"><input id="search" type="search" placeholder="Filter tasks"></div>
@@ -125,15 +139,12 @@
     </section>
     <div>
       <div id="errors" class="errors"></div>
-      <footer id="footer" class="footer">Starting Mise view…</footer>
+      <footer id="footer" class="footer">Loading Mise data…</footer>
     </div>
   </main>
   <script>
     (() => {
       "use strict";
-      // Replaced by the plugin with its initial snapshot. This intentionally
-      // follows OpenIDEA's official HTML-view bootstrap pattern.
-      const START = "__START__";
       let state = {};
       let activeTab = "tasks";
       let selectedGraphTask = null;
@@ -588,8 +599,8 @@
       }
       function initialize() {
         try {
-          bridge = openidea;
-          state = normalizeState(START);
+          bridge = globalThis.openidea;
+          state = normalizeState({loading: true});
           if (!bridge || typeof bridge.onMessage !== "function") {
             throw new Error("OpenIDEA message bridge is unavailable");
           }
@@ -598,6 +609,11 @@
             button.addEventListener("click", () => setTab(button.dataset.tab))
           );
           byId("search").addEventListener("input", renderTasks);
+          byId("refresh").addEventListener("click", () => {
+            state.loading = true;
+            render();
+            send({op: "refresh"});
+          });
           render();
           setTab("tasks");
           send({op: "ready"});
@@ -608,3 +624,5 @@
       initialize();
     })();
   </script>
+</body>
+</html>

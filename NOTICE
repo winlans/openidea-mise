@@ -13,8 +13,9 @@ https://github.com/jdx/mise
 Copyright (c) 2025 Jeff Dickey
 Licensed under the MIT License.
 
-icons/mise.svg changes only the fill to currentColor so the official logo
-remains visible as an OpenIDEA tool-window icon in both light and dark themes.
+icons/mise.svg keeps the official path geometry and adds an inner
+currentColor fill so OpenIDEA's external-icon extraction preserves the logo
+in both light and dark themes.
 
 MIT License
 

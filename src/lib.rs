@@ -5,7 +5,7 @@ mod state;
 mod toml_support;
 
 use crate::model::{MiseTask, Snapshot, task_configuration_id};
-use openidea_plugin::views::{Body, Button, View, ViewEvent, Viewport, Views};
+use openidea_plugin::views::{View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
     Error, Event, Invocation, NotificationLevel, Plugin, PluginRunConfiguration, PluginRunTarget,
     RunConfigurations, host, register_plugin,
@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 const VIEW: &str = "mise";
-const PAGE: &str = include_str!("page.html");
 const CONFIG_FILES: [&str; 4] = [
     "mise.toml",
     ".mise.toml",
@@ -233,18 +232,12 @@ impl Views for OpenideaMise {
         &mut self,
         view: &str,
         _viewport: Option<Viewport>,
-        ctx: &Invocation,
+        _ctx: &Invocation,
     ) -> Result<View, Error> {
         if view != VIEW {
             return Err(Error::NotFound(view.into()));
         }
-        let (_, root) = Self::root(ctx)?;
-        let snapshot = self.snapshot(&root);
-        let start = snapshot_message(&snapshot)
-            .to_string()
-            .replace('<', "\\u003c");
-        let page = PAGE.replacen(r#""__START__""#, &start, 1);
-        Ok(View::new(Body::Html(page)).button(Button::new("refresh", "Refresh").icon("refresh")))
+        Ok(View::message("Mise is shown by the plugin's web view."))
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
@@ -252,13 +245,12 @@ impl Views for OpenideaMise {
             return Err(Error::NotFound(view.into()));
         }
         match event {
-            ViewEvent::Button(button) if button == "refresh" => self.post_snapshot(ctx, true),
             ViewEvent::Message(message) => {
                 let Ok(value) = serde_json::from_str::<Value>(&message) else {
                     return Ok(());
                 };
                 match value.get("op").and_then(Value::as_str) {
-                    Some("ready") => self.post_snapshot(ctx, false),
+                    Some("ready") => self.post_snapshot(ctx, true),
                     Some("refresh") => self.post_snapshot(ctx, true),
                     Some("runTask") => {
                         let name = value.get("task").and_then(Value::as_str);
@@ -449,19 +441,13 @@ mod tests {
     }
 
     #[test]
-    fn view_never_embeds_a_redacted_secret() {
+    fn snapshot_messages_never_expose_a_redacted_secret() {
         let host = host_with_mise();
         let mut plugin = OpenideaMise::default();
-        plugin.refresh(&host.invocation()).unwrap();
-        let View {
-            body: Body::Html(page),
-            ..
-        } = plugin.render(VIEW, None, &host.invocation()).unwrap()
-        else {
-            panic!("expected html")
-        };
-        assert!(!page.contains("\"secret\""));
-        assert!(page.contains("••••••••"));
+        let snapshot = plugin.refresh(&host.invocation()).unwrap();
+        let message = snapshot_message(&snapshot).to_string();
+        assert!(!message.contains("\"secret\""));
+        assert!(message.contains("••••••••"));
     }
 
     #[test]
@@ -519,28 +505,36 @@ mod tests {
     }
 
     #[test]
-    fn rendered_html_uses_the_official_single_script_bootstrap_pattern() {
+    fn web_view_ready_refreshes_and_posts_a_snapshot() {
         let host = host_with_mise();
         let mut plugin = OpenideaMise::default();
-        plugin.refresh(&host.invocation()).unwrap();
-        let View {
-            body: Body::Html(page),
-            ..
-        } = plugin.render(VIEW, None, &host.invocation()).unwrap()
-        else {
-            panic!("expected html")
-        };
+        plugin
+            .handle(
+                VIEW,
+                ViewEvent::Message(r#"{"op":"ready"}"#.into()),
+                &host.invocation(),
+            )
+            .unwrap();
 
-        assert!(!page.contains("<!doctype"));
-        assert!(!page.contains("<html>"));
-        assert!(!page.contains("<head>"));
-        assert!(!page.contains("<body>"));
-        assert!(!page.contains("\"__START__\""));
-        assert!(!page.contains("type=\"application/json\""));
-        assert!(page.contains("const START = {"));
-        assert!(page.contains("bridge = openidea"));
-        assert_eq!(page.matches("<script>").count(), 1);
-        assert!(!page.contains("<strong>Mise</strong>"));
+        let messages = host.view_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, VIEW);
+        let snapshot: Value = serde_json::from_str(&messages[0].1).unwrap();
+        assert_eq!(snapshot["tasks"][0]["name"], "build");
+        assert_eq!(snapshot["tools"][0]["name"], "node");
+    }
+
+    #[test]
+    fn packaged_web_view_has_no_duplicate_mise_heading() {
+        const PAGE: &str = include_str!("../web/index.html");
+        const MANIFEST: &str = include_str!("../plugin.toml");
+
+        assert!(PAGE.contains("<!doctype html>"));
+        assert!(PAGE.contains("globalThis.openidea"));
+        assert!(PAGE.contains(r#"id="refresh""#));
+        assert!(!PAGE.contains("<strong>Mise</strong>"));
+        assert!(MANIFEST.contains(r#"web = "web/index.html""#));
+        assert!(MANIFEST.contains(r#"header = "none""#));
     }
 
     #[test]

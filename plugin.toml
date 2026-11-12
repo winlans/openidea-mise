@@ -42,6 +42,8 @@ id = "mise"
 title = "Mise"
 icon = "icons/mise.svg"
 location = "bottom"
+web = "web/index.html"
+header = "none"
 
 [[contributes.runConfigurations]]
 files = ["mise.toml", ".mise.toml", "mise.local.toml", ".mise.local.toml"]
