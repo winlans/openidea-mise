@@ -52,6 +52,19 @@ openidea-plugin build .
 openidea-plugin check .
 ```
 
+With mise, the complete local workflow is:
+
+```sh
+mise run check
+mise run package-local
+```
+
+`package-local` builds and validates an unsigned
+`dist/winlans.mise-<version>-local.oiplugin` that can be installed from disk.
+It does not read or use the production publisher signing key. The signed
+release path remains `scripts/build-package.sh`. Verify the local artifact with
+`sha256sum -c dist/winlans.mise-<version>-local.oiplugin.sha256`.
+
 See [the port plan](docs/openidea-mise-port-plan.md) for the staged feature and
 release roadmap. See [the release runbook](docs/releasing.md) for signing-key,
 GitHub Environment, and automatic Marketplace publication setup.

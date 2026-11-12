@@ -1,0 +1,69 @@
+min_version = "2024.9.5"
+
+[tools]
+python = "3.12"
+rust = { version = "1.98.1", profile = "minimal", components = ["clippy", "rustfmt"], targets = ["wasm32-wasip2"] }
+
+[env]
+CARGO_TERM_COLOR = "always"
+OPENIDEA_CLI_VERSION = "0.1.40"
+
+[tasks.setup]
+description = "Install the pinned OpenIDEA plugin CLI when it is missing"
+run = """
+if [ ! -x .tools/openidea-plugin ]; then
+  scripts/install-openidea-plugin.sh
+fi
+"""
+
+[tasks.versions]
+description = "Check Cargo, lockfile, and plugin manifest versions"
+run = "python3 scripts/check_versions.py"
+
+[tasks.fmt]
+description = "Check Rust formatting"
+run = "cargo fmt --check"
+
+[tasks.clippy]
+description = "Run Clippy with warnings denied"
+run = "cargo clippy --locked --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Run Rust tests"
+run = "cargo test --locked"
+
+[tasks."test-release-scripts"]
+description = "Run release and registry script tests"
+run = "python3 -m unittest discover -s scripts -p 'test_*.py'"
+
+[tasks.build]
+description = "Build the release Wasm component with the OpenIDEA CLI"
+depends = ["setup", "versions"]
+run = ".tools/openidea-plugin build ."
+
+[tasks."plugin-check"]
+description = "Build and validate the unpacked OpenIDEA plugin"
+depends = ["build"]
+run = ".tools/openidea-plugin check ."
+
+[tasks.check]
+description = "Run all source, test, build, and plugin validation checks"
+depends = ["fmt", "clippy", "test", "test-release-scripts", "plugin-check"]
+
+[tasks."package-local"]
+alias = ["package", "local-package"]
+description = "Build and validate an unsigned package that can be installed from disk"
+depends = ["check"]
+run = "scripts/build-local-package.sh"
+
+[tasks."package-release"]
+description = "Build the signed release package using OPENIDEA_SIGNING_KEY_FILE"
+depends = ["check"]
+run = """
+version="$(python3 scripts/check_versions.py --print-version)"
+scripts/build-package.sh "$version"
+"""
+
+[tasks.default]
+description = "Run the complete project check"
+depends = ["check"]

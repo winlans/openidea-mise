@@ -78,6 +78,19 @@ base64 < ~/.config/openidea-mise/signing.key | tr -d '\n'
 
 ## 本地发布验证
 
+日常开发需要生成可从磁盘安装的未签名包时，运行：
+
+```sh
+mise run package-local
+```
+
+产物为 `dist/winlans.mise-<version>-local.oiplugin` 及对应的
+`.sha256` 文件。可从项目根目录运行
+`sha256sum -c dist/winlans.mise-<version>-local.oiplugin.sha256` 校验。
+该任务不会读取 production publisher key。
+
+需要验证正式签名发布链时，再运行：
+
 ```sh
 scripts/install-openidea-plugin.sh
 python3 scripts/check_versions.py
