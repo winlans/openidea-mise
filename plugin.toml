@@ -7,6 +7,7 @@ homepage = "https://github.com/winlans/openidea-mise"
 license = "Apache-2.0"
 change-notes = "0.1.0 — first OpenIDEA port with tasks, tools, environment and run integration."
 categories = ["tools"]
+icon = "icons/mise.svg"
 engines.openidea = "^1.4"
 wasm = "dist/plugin.wasm"
 activation = [
@@ -39,7 +40,7 @@ category = "Mise"
 [[contributes.views]]
 id = "mise"
 title = "Mise"
-icon = "run"
+icon = "icons/mise.svg"
 location = "bottom"
 
 [[contributes.runConfigurations]]

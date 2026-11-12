@@ -519,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn rendered_html_is_a_host_fragment_with_json_initial_state() {
+    fn rendered_html_uses_the_official_single_script_bootstrap_pattern() {
         let host = host_with_mise();
         let mut plugin = OpenideaMise::default();
         plugin.refresh(&host.invocation()).unwrap();
@@ -536,8 +536,11 @@ mod tests {
         assert!(!page.contains("<head>"));
         assert!(!page.contains("<body>"));
         assert!(!page.contains("\"__START__\""));
-        assert!(page.contains("id=\"mise-initial-state\""));
-        assert!(page.contains("globalThis.openidea"));
+        assert!(!page.contains("type=\"application/json\""));
+        assert!(page.contains("const START = {"));
+        assert!(page.contains("bridge = openidea"));
+        assert_eq!(page.matches("<script>").count(), 1);
+        assert!(!page.contains("<strong>Mise</strong>"));
     }
 
     #[test]
