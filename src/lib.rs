@@ -344,7 +344,7 @@ impl RunConfigurations for OpenideaMise {
 fn run_configuration(project_root: &str, task: &MiseTask) -> PluginRunConfiguration {
     PluginRunConfiguration {
         id: task_configuration_id(&task.name),
-        name: format!("Mise: {}", task.name),
+        name: task.name.clone(),
         program: "mise".into(),
         args: vec!["run".into(), task.name.clone()],
         cwd: Some(project_root.into()),
@@ -354,7 +354,7 @@ fn run_configuration(project_root: &str, task: &MiseTask) -> PluginRunConfigurat
 }
 
 fn configure_run_target(project: &openidea_plugin::Project) -> Result<(), Error> {
-    if !host::setting_bool("registerRunTarget").unwrap_or(true) {
+    if !host::setting_bool("registerRunTarget").unwrap_or(false) {
         host::unregister_run_target(project, "mise.exec");
         return Ok(());
     }
@@ -489,13 +489,27 @@ mod tests {
         assert!(snapshot.environment[0].sensitive);
 
         let configs = plugin.configurations("/project");
-        assert_eq!(configs[0].name, "Mise: build");
+        assert_eq!(configs[0].name, "build");
         assert_eq!(configs[0].program, "mise");
         assert_eq!(configs[0].args, ["run", "build"]);
 
         let mut reloaded = OpenideaMise::default();
-        assert_eq!(reloaded.configurations("/project")[0].name, "Mise: build");
+        assert_eq!(reloaded.configurations("/project")[0].name, "build");
         assert!(reloaded.snapshot("/project").environment.is_empty());
+    }
+
+    #[test]
+    fn mise_run_target_is_opt_in_and_is_withdrawn_when_disabled() {
+        let host = host_with_mise();
+        let project = host.invocation().project().unwrap();
+
+        host.set_setting("registerRunTarget", "true");
+        configure_run_target(&project).unwrap();
+        assert_eq!(host.run_targets().len(), 1);
+
+        host.set_setting("registerRunTarget", "false");
+        configure_run_target(&project).unwrap();
+        assert!(host.run_targets().is_empty());
     }
 
     #[test]
@@ -669,16 +683,27 @@ mod tests {
     fn packaged_web_view_has_no_duplicate_mise_heading() {
         const PAGE: &str = include_str!("../web/index.html");
         const MANIFEST: &str = include_str!("../plugin.toml");
+        const ICON: &str = include_str!("../icons/mise.svg");
+        const SETTINGS: &str = include_str!("../settings.schema.json");
 
         assert!(PAGE.contains("<!doctype html>"));
         assert!(PAGE.contains("globalThis.openidea"));
         assert!(PAGE.contains("sessionId"));
+        assert!(PAGE.contains("::-webkit-scrollbar-track"));
+        assert!(PAGE.contains("scrollbar-color: var(--openidea-border) transparent"));
         assert!(PAGE.contains(r#"send({op: "trust"})"#));
         assert!(PAGE.contains("Cancel"));
         assert!(PAGE.contains(r#"id="refresh""#));
         assert!(!PAGE.contains("<strong>Mise</strong>"));
         assert!(MANIFEST.contains(r#"web = "web/index.html""#));
         assert!(MANIFEST.contains(r#"header = "none""#));
+        assert!(ICON.contains(r##"fill="#CACCD2""##));
+        assert!(ICON.contains(r##"stroke="#CACCD2""##));
+        let settings: Value = serde_json::from_str(SETTINGS).unwrap();
+        assert_eq!(
+            settings["properties"]["registerRunTarget"]["default"],
+            false
+        );
     }
 
     #[test]

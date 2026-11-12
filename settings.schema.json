@@ -15,8 +15,8 @@
     "registerRunTarget": {
       "type": "boolean",
       "title": "Offer Mise as a run target",
-      "description": "Make the mise exec wrapper available in the Run Target selector.",
-      "default": true
+      "description": "Make the mise exec wrapper available in the Run Target selector. Enabling it may add Mise to run-configuration labels when selected as the project target.",
+      "default": false
     }
   }
 }

@@ -15,8 +15,8 @@ The port is implemented against OpenIDEA Plugin API 1.4 and runs as a sandboxed
   and cycles.
 - Complete and navigate task names in Mise TOML files, with task hover,
   Rename/Find Usages indexing, Run gutter actions, and Shell script injection.
-- Use generated `Mise: <task>` run configurations or the optional `mise.exec`
-  Run Target.
+- Use generated run configurations named exactly after each task. The optional
+  `mise.exec` Run Target is disabled by default so task labels stay compact.
 
 Environment variables whose names look sensitive are masked by default. A
 revealed value remains in the current tool-window session and is never written
@@ -33,6 +33,11 @@ to plugin storage.
   refresh, tasks, generated run configurations, and the Mise Run Target. If
   this high-risk capability is denied, TOML editing features still work and the
   tool window reports that refresh is unavailable.
+
+The `mise.exec` Run Target can be enabled in the plugin settings when other run
+configurations should be wrapped with `mise exec --`. It is opt-in because
+selecting it as OpenIDEA's project-wide default appends a target label to every
+run configuration.
 
 ## Development
 

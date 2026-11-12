@@ -52,7 +52,7 @@ OpenIDEA smoke test 都通过后才算完成。
 
 任务列表生成动态 OpenIDEA Run Configuration：
 
-- 名称：`Mise: <task>`
+- 名称：`<task>`（保持运行配置选择器紧凑）
 - 程序：`mise`
 - 参数：`run <task>`
 - 工作目录：项目根目录
@@ -76,14 +76,15 @@ OpenIDEA smoke test 都通过后才算完成。
 
 ## 阶段 3：Mise Run Target
 
-注册项目级 `mise.exec` Run Target，将用户显式选择的 Run/Test/Debug 命令包装为：
+可选注册项目级 `mise.exec` Run Target，将用户显式选择的 Run/Test/Debug 命令包装为：
 
 ```text
 mise exec -- <original-program> <original-args>
 ```
 
 参数始终使用 argv 传递，不经过 shell 拼接。Run Target 仅在项目可信且
-`process:mise` 已授权时注册；注册只使目标可选，不自动改变现有运行配置。
+`process:mise` 已授权时注册。该功能默认关闭，避免 OpenIDEA 将目标信息追加到
+所有任务名称；用户确实需要包装其他运行配置时可在插件设置中开启。
 
 ## 阶段 4：稳定化
 
