@@ -699,6 +699,7 @@ mod tests {
         assert!(MANIFEST.contains(r#"header = "none""#));
         assert!(ICON.contains(r##"fill="#CACCD2""##));
         assert!(ICON.contains(r##"stroke="#CACCD2""##));
+        assert!(!ICON.contains("data-themed"));
         let settings: Value = serde_json::from_str(SETTINGS).unwrap();
         assert_eq!(
             settings["properties"]["registerRunTarget"]["default"],
