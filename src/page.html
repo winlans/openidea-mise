@@ -1,9 +1,4 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
+<style>
     :root { color-scheme: light dark; }
     * { box-sizing: border-box; }
     body {
@@ -120,8 +115,7 @@
       .graph-details { grid-template-columns: 1fr; }
     }
   </style>
-</head>
-<body>
+  <script id="mise-initial-state" type="application/json">"__START__"</script>
   <main class="shell">
     <header class="topbar">
       <strong>Mise</strong>
@@ -150,18 +144,58 @@
   <script>
     (() => {
       "use strict";
-      let state = "__START__";
+      let state = {};
       let activeTab = "tasks";
       let selectedGraphTask = null;
       let timer = null;
       const byId = id => document.getElementById(id);
-      const send = value => window.openidea.postMessage(JSON.stringify(value));
+      const bridge = globalThis.openidea;
       const text = value => value == null ? "" : String(value);
+      const errorText = error => {
+        if (error && typeof error === "object" && "message" in error) return text(error.message);
+        return text(error) || "Unknown error";
+      };
+      const showFatal = error => {
+        const message = `Mise view error: ${errorText(error)}`;
+        const errors = byId("errors");
+        const footer = byId("footer");
+        if (errors) errors.replaceChildren(make("div", "error", message));
+        if (footer) footer.textContent = message;
+      };
+      window.addEventListener("error", event => showFatal(event.error || event.message));
+      window.addEventListener("unhandledrejection", event => showFatal(event.reason));
+      const send = value => {
+        if (!bridge || typeof bridge.postMessage !== "function") {
+          throw new Error("OpenIDEA message bridge is unavailable");
+        }
+        bridge.postMessage(JSON.stringify(value));
+      };
       const make = (tag, className, value) => {
         const element = document.createElement(tag);
         if (className) element.className = className;
         if (value != null) element.textContent = text(value);
         return element;
+      };
+      const normalizeState = value => {
+        const source = value && typeof value === "object" ? value : {};
+        const list = candidate => Array.isArray(candidate) ? candidate : [];
+        const graph = source.graph && typeof source.graph === "object" ? source.graph : {};
+        return {
+          op: "snapshot",
+          project: text(source.project),
+          tasks: list(source.tasks),
+          graph: {
+            nodes: list(graph.nodes),
+            edges: list(graph.edges),
+            cycles: list(graph.cycles),
+            missing: list(graph.missing)
+          },
+          tools: list(source.tools),
+          environment: list(source.environment),
+          errors: list(source.errors).map(text),
+          autoRefreshSeconds: Number(source.autoRefreshSeconds || 0),
+          loading: Boolean(source.loading)
+        };
       };
       const makeSvg = (tag, attributes = {}) => {
         const element = document.createElementNS("http://www.w3.org/2000/svg", tag);
@@ -534,44 +568,65 @@
         ["tasks", "graph", "tools", "environment"].forEach(id => byId(id).classList.toggle("hidden", id !== tab));
         byId("search-bar").classList.toggle("hidden", tab !== "tasks");
       }
-      document.querySelectorAll(".tab").forEach(button =>
-        button.addEventListener("click", () => setTab(button.dataset.tab))
-      );
-      byId("search").addEventListener("input", renderTasks);
-      byId("refresh").addEventListener("click", () => {
-        state.loading = true;
-        render();
-        send({op: "refresh"});
-      });
-      window.openidea.onMessage(message => {
+      function handleMessage(message) {
         let next;
-        try { next = JSON.parse(message); } catch (_) { return; }
-        if (next.op === "snapshot") {
-          state = next;
-          render();
-          setTab(activeTab);
-        } else if (next.op === "environmentValue") {
-          document.querySelectorAll("[data-environment-name]").forEach(cell => {
-            if (cell.dataset.environmentName === next.name) {
-              cell.textContent = text(next.value);
-              cell.className = "name";
-              const button = cell.parentElement.querySelector(".reveal");
-              if (button) button.remove();
+        try {
+          next = JSON.parse(message);
+          if (next.op === "snapshot") {
+            state = normalizeState(next);
+            render();
+            setTab(activeTab);
+          } else if (next.op === "environmentValue") {
+            document.querySelectorAll("[data-environment-name]").forEach(cell => {
+              if (cell.dataset.environmentName === next.name) {
+                cell.textContent = text(next.value);
+                cell.className = "name";
+                const button = cell.parentElement.querySelector(".reveal");
+                if (button) button.remove();
+              }
+            });
+          } else if (next.op === "runStarted") {
+            byId("footer").textContent = `Started ${text(next.task)}`;
+          } else if (next.op === "error") {
+            const errors = [...(state.errors || []), text(next.message)];
+            state = {...state, loading: false, errors};
+            render();
+          }
+        } catch (error) {
+          showFatal(error);
+        }
+      }
+      function initialize() {
+        try {
+          const initial = byId("mise-initial-state");
+          if (!initial) throw new Error("initial state element is missing");
+          state = normalizeState(JSON.parse(initial.textContent || "{}"));
+          if (!bridge || typeof bridge.onMessage !== "function") {
+            throw new Error("OpenIDEA message bridge is unavailable");
+          }
+          bridge.onMessage(handleMessage);
+          document.querySelectorAll(".tab").forEach(button =>
+            button.addEventListener("click", () => setTab(button.dataset.tab))
+          );
+          byId("search").addEventListener("input", renderTasks);
+          byId("refresh").addEventListener("click", () => {
+            state.loading = true;
+            render();
+            try {
+              send({op: "refresh"});
+            } catch (error) {
+              state.loading = false;
+              showFatal(error);
             }
           });
-        } else if (next.op === "runStarted") {
-          byId("footer").textContent = `Started ${text(next.task)}`;
-        } else if (next.op === "error") {
-          const errors = [...(state.errors || []), text(next.message)];
-          state = {...state, loading: false, errors};
+          state.loading = true;
           render();
+          setTab("tasks");
+          send({op: "refresh"});
+        } catch (error) {
+          showFatal(error);
         }
-      });
-      render();
-      setTab("tasks");
-      send({op: "ready"});
-      send({op: "refresh"});
+      }
+      initialize();
     })();
   </script>
-</body>
-</html>

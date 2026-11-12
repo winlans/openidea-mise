@@ -7,8 +7,8 @@ mod toml_support;
 use crate::model::{MiseTask, Snapshot, task_configuration_id};
 use openidea_plugin::views::{Body, Button, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Error, Event, Invocation, Plugin, PluginRunConfiguration, PluginRunTarget, RunConfigurations,
-    host, register_plugin,
+    Error, Event, Invocation, NotificationLevel, Plugin, PluginRunConfiguration, PluginRunTarget,
+    RunConfigurations, host, register_plugin,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -102,14 +102,10 @@ impl OpenideaMise {
         task_name: Option<&str>,
     ) -> Result<Option<String>, Error> {
         let (_, root) = Self::root(ctx)?;
-        let snapshot = self.snapshot(&root);
-        let task = match task_name {
-            Some(name) => snapshot
-                .tasks
-                .iter()
-                .find(|task| task.name == name)
-                .ok_or_else(|| Error::NotFound(format!("mise task {name}")))?,
+        let task_name = match task_name {
+            Some(name) => validate_task_name(name)?.to_owned(),
             None => {
+                let snapshot = self.snapshot(&root);
                 let items: Vec<_> = snapshot
                     .tasks
                     .iter()
@@ -121,14 +117,39 @@ impl OpenideaMise {
                 let Some(chosen) = host::pick("Run Mise task", &items)? else {
                     return Err(Error::Cancelled);
                 };
-                snapshot
+                let name = snapshot
                     .tasks
                     .iter()
                     .find(|task| task.name == chosen)
-                    .ok_or_else(|| Error::NotFound(format!("mise task {chosen}")))?
+                    .map(|task| task.name.as_str())
+                    .ok_or_else(|| Error::NotFound(format!("mise task {chosen}")))?;
+                validate_task_name(name)?.to_owned()
             }
         };
-        host::start_run(&task_configuration_id(&task.name), &[], false).map(Some)
+        match host::start_run(&task_configuration_id(&task_name), &[], false) {
+            Ok(operation) => Ok(Some(operation)),
+            Err(run_error) => {
+                let args = vec!["run".into(), task_name.clone()];
+                host::open_terminal(&format!("Mise: {task_name}"), "mise", &args).map_err(
+                    |terminal_error| {
+                        Error::Failed(format!(
+                            "could not run mise task {task_name}: Run tool: {run_error}; terminal fallback: {terminal_error}"
+                        ))
+                    },
+                )?;
+                host::notify(
+                    NotificationLevel::Info,
+                    "Mise task opened in terminal",
+                    &format!(
+                        "The Run configuration was unavailable, so `{task_name}` was started in a terminal."
+                    ),
+                );
+                Ok(Some(format!(
+                    "terminal:{}",
+                    task_configuration_id(&task_name)
+                )))
+            }
+        }
     }
 
     fn invalidate(&mut self, ctx: &Invocation) {
@@ -170,7 +191,13 @@ impl Plugin for OpenideaMise {
                 host::reveal_view(VIEW)?;
                 Ok(None)
             }
-            "run-task" => self.run_task(ctx, arg),
+            "run-task" => match self.run_task(ctx, arg) {
+                Ok(result) => Ok(result),
+                Err(error) => {
+                    notify_run_error(arg, &error);
+                    Err(error)
+                }
+            },
             _ => Err(Error::NotFound(format!("command {id}"))),
         }
     }
@@ -241,7 +268,10 @@ impl Views for OpenideaMise {
                                 &json!({"op":"runStarted","task":name.unwrap_or_default()})
                                     .to_string(),
                             ),
-                            Err(error) => post_error(&error.to_string()),
+                            Err(error) => {
+                                notify_run_error(name, &error);
+                                post_error(&error.to_string())
+                            }
                         }
                     }
                     Some("revealEnvironment") => {
@@ -321,6 +351,30 @@ fn snapshot_message(snapshot: &Snapshot) -> Value {
 
 fn post_error(message: &str) -> Result<(), Error> {
     host::post_view_message(VIEW, &json!({"op":"error","message":message}).to_string())
+}
+
+fn notify_run_error(task: Option<&str>, error: &Error) {
+    let subject = task
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("task `{name}`"))
+        .unwrap_or_else(|| "task".into());
+    host::notify(
+        NotificationLevel::Error,
+        "Could not run Mise task",
+        &format!("Failed to start {subject}: {error}"),
+    );
+}
+
+fn validate_task_name(name: &str) -> Result<&str, Error> {
+    if name.is_empty()
+        || name.len() > 256
+        || name
+            .chars()
+            .any(|character| character == '\0' || character == '\r' || character == '\n')
+    {
+        return Err(Error::Invalid("invalid mise task name".into()));
+    }
+    Ok(name)
 }
 
 fn is_config_path(path: &str) -> bool {
@@ -427,6 +481,63 @@ mod tests {
             host.configuration_runs()[0].1,
             task_configuration_id("build")
         );
+    }
+
+    #[test]
+    fn run_task_falls_back_to_a_terminal_when_configuration_is_unavailable() {
+        let host = host_with_mise();
+        let mut plugin = OpenideaMise::default();
+        plugin.refresh(&host.invocation()).unwrap();
+
+        let operation = plugin
+            .run_task(&host.invocation(), Some("build"))
+            .unwrap()
+            .unwrap();
+
+        assert!(operation.starts_with("terminal:"));
+        assert_eq!(host.terminals().len(), 1);
+        assert_eq!(host.terminals()[0].program, "mise");
+        assert_eq!(host.terminals()[0].args, ["run", "build"]);
+        assert_eq!(
+            host.notifications()[0].title,
+            "Mise task opened in terminal"
+        );
+    }
+
+    #[test]
+    fn run_command_notifies_when_both_run_paths_fail() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage", "events"]);
+        host.set_project_root(Some("/project"));
+        let mut plugin = OpenideaMise::default();
+
+        let error = plugin
+            .run_command("run-task", &host.invocation(), Some("build"))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("could not run mise task build"));
+        assert_eq!(host.notifications()[0].title, "Could not run Mise task");
+    }
+
+    #[test]
+    fn rendered_html_is_a_host_fragment_with_json_initial_state() {
+        let host = host_with_mise();
+        let mut plugin = OpenideaMise::default();
+        plugin.refresh(&host.invocation()).unwrap();
+        let View {
+            body: Body::Html(page),
+            ..
+        } = plugin.render(VIEW, None, &host.invocation()).unwrap()
+        else {
+            panic!("expected html")
+        };
+
+        assert!(!page.contains("<!doctype"));
+        assert!(!page.contains("<html>"));
+        assert!(!page.contains("<head>"));
+        assert!(!page.contains("<body>"));
+        assert!(!page.contains("\"__START__\""));
+        assert!(page.contains("id=\"mise-initial-state\""));
+        assert!(page.contains("globalThis.openidea"));
     }
 
     #[test]
