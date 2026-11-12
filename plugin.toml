@@ -15,6 +15,7 @@ activation = [
   "on-command:*",
   "on-event:file-saved",
   "on-event:files-changed",
+  "on-event:editor-focused",
   "on-event:settings-changed",
 ]
 

@@ -49,6 +49,7 @@ pub struct Snapshot {
     pub tools: Vec<MiseTool>,
     pub environment: Vec<EnvironmentValue>,
     pub errors: Vec<String>,
+    pub trust_required: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +79,7 @@ impl From<CachedSnapshot> for Snapshot {
             tools: value.tools,
             environment: Vec::new(),
             errors: Vec::new(),
+            trust_required: false,
         }
     }
 }
@@ -106,6 +108,7 @@ impl Snapshot {
             "tools": self.tools,
             "environment": environment,
             "errors": self.errors,
+            "trustRequired": self.trust_required,
             "autoRefreshSeconds": auto_refresh_seconds,
         })
     }

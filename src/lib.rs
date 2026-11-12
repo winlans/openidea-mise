@@ -7,8 +7,8 @@ mod toml_support;
 use crate::model::{MiseTask, Snapshot, task_configuration_id};
 use openidea_plugin::views::{View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Error, Event, Invocation, NotificationLevel, Plugin, PluginRunConfiguration, PluginRunTarget,
-    RunConfigurations, host, register_plugin,
+    Error, Event, EventKind, Invocation, NotificationLevel, Plugin, PluginRunConfiguration,
+    PluginRunTarget, RunConfigurations, host, register_plugin,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -56,20 +56,33 @@ impl OpenideaMise {
         let mut snapshot = self.snapshot(&root);
         snapshot.project = root.clone();
         snapshot.errors.clear();
+        snapshot.trust_required = false;
 
         match mise::tasks(&project) {
             Ok(tasks) => snapshot.tasks = tasks,
+            Err(error) if mise::requires_trust(&error) => {
+                snapshot.tasks.clear();
+                snapshot.tools.clear();
+                snapshot.environment.clear();
+                snapshot.trust_required = true;
+                snapshot.errors.push(
+                    "Mise configuration is not trusted. Trust it to load project tasks, tools, and environment."
+                        .into(),
+                );
+            }
             Err(error) => snapshot.errors.push(format!("Tasks: {error}")),
         }
-        match mise::tools(&project) {
-            Ok(tools) => snapshot.tools = tools,
-            Err(error) => snapshot.errors.push(format!("Tools: {error}")),
-        }
-        match mise::environment(&project) {
-            Ok(environment) => snapshot.environment = environment,
-            Err(error) => {
-                snapshot.environment.clear();
-                snapshot.errors.push(format!("Environment: {error}"));
+        if !snapshot.trust_required {
+            match mise::tools(&project) {
+                Ok(tools) => snapshot.tools = tools,
+                Err(error) => snapshot.errors.push(format!("Tools: {error}")),
+            }
+            match mise::environment(&project) {
+                Ok(environment) => snapshot.environment = environment,
+                Err(error) => {
+                    snapshot.environment.clear();
+                    snapshot.errors.push(format!("Environment: {error}"));
+                }
             }
         }
 
@@ -85,14 +98,29 @@ impl OpenideaMise {
         Ok(snapshot)
     }
 
-    fn post_snapshot(&mut self, ctx: &Invocation, refresh: bool) -> Result<(), Error> {
+    fn post_snapshot(
+        &mut self,
+        ctx: &Invocation,
+        refresh: bool,
+        session_id: Option<&str>,
+    ) -> Result<(), Error> {
         let (_, root) = Self::root(ctx)?;
         let snapshot = if refresh {
             self.refresh(ctx)?
         } else {
             self.snapshot(&root)
         };
-        host::post_view_message(VIEW, &snapshot_message(&snapshot).to_string())
+        host::post_view_message(VIEW, &snapshot_message(&snapshot, session_id).to_string())
+    }
+
+    fn trust_configuration(
+        &mut self,
+        ctx: &Invocation,
+        session_id: Option<&str>,
+    ) -> Result<(), Error> {
+        let (project, _) = Self::root(ctx)?;
+        mise::trust(&project).map_err(Error::Failed)?;
+        self.post_snapshot(ctx, true, session_id)
     }
 
     fn run_task(
@@ -157,7 +185,7 @@ impl OpenideaMise {
         };
         self.snapshots.remove(&root);
         state::delete(&root);
-        host::refresh_view(VIEW);
+        let _ = self.post_snapshot(ctx, true, None);
     }
 }
 
@@ -171,6 +199,7 @@ impl Plugin for OpenideaMise {
         ];
         host::subscribe_paths("file-saved", &globs)?;
         host::subscribe_paths("files-changed", &globs)?;
+        host::subscribe(EventKind::EditorFocused)?;
         Ok(())
     }
 
@@ -186,7 +215,7 @@ impl Plugin for OpenideaMise {
                 Ok(None)
             }
             "refresh" => {
-                self.post_snapshot(ctx, true)?;
+                self.post_snapshot(ctx, true, None)?;
                 host::reveal_view(VIEW)?;
                 Ok(None)
             }
@@ -219,7 +248,10 @@ impl Plugin for OpenideaMise {
                     if let Ok((project, _)) = Self::root(ctx) {
                         let _ = configure_run_target(&project);
                     }
-                    let _ = self.post_snapshot(ctx, false);
+                    let _ = self.post_snapshot(ctx, false, None);
+                }
+                Event::EditorFocused(_) => {
+                    let _ = self.post_snapshot(ctx, false, None);
                 }
                 _ => {}
             }
@@ -249,20 +281,25 @@ impl Views for OpenideaMise {
                 let Ok(value) = serde_json::from_str::<Value>(&message) else {
                     return Ok(());
                 };
+                let session_id = message_session_id(&value);
                 match value.get("op").and_then(Value::as_str) {
-                    Some("ready") => self.post_snapshot(ctx, true),
-                    Some("refresh") => self.post_snapshot(ctx, true),
+                    Some("ready") => self.post_snapshot(ctx, true, session_id),
+                    Some("refresh") => self.post_snapshot(ctx, true, session_id),
+                    Some("sync") => self.post_snapshot(ctx, false, session_id),
+                    Some("trust") => match self.trust_configuration(ctx, session_id) {
+                        Ok(()) => Ok(()),
+                        Err(error) => post_error(&error.to_string(), session_id),
+                    },
                     Some("runTask") => {
                         let name = value.get("task").and_then(Value::as_str);
                         match self.run_task(ctx, name) {
-                            Ok(_) => host::post_view_message(
-                                VIEW,
-                                &json!({"op":"runStarted","task":name.unwrap_or_default()})
-                                    .to_string(),
+                            Ok(_) => post_message(
+                                json!({"op":"runStarted","task":name.unwrap_or_default()}),
+                                session_id,
                             ),
                             Err(error) => {
                                 notify_run_error(name, &error);
-                                post_error(&error.to_string())
+                                post_error(&error.to_string(), session_id)
                             }
                         }
                     }
@@ -275,12 +312,14 @@ impl Views for OpenideaMise {
                         let Some(entry) =
                             snapshot.environment.iter().find(|entry| entry.name == name)
                         else {
-                            return post_error("environment value is no longer available");
+                            return post_error(
+                                "environment value is no longer available",
+                                session_id,
+                            );
                         };
-                        host::post_view_message(
-                            VIEW,
-                            &json!({"op":"environmentValue","name":entry.name,"value":entry.value})
-                                .to_string(),
+                        post_message(
+                            json!({"op":"environmentValue","name":entry.name,"value":entry.value}),
+                            session_id,
                         )
                     }
                     _ => Ok(()),
@@ -333,16 +372,34 @@ fn configure_run_target(project: &openidea_plugin::Project) -> Result<(), Error>
     )
 }
 
-fn snapshot_message(snapshot: &Snapshot) -> Value {
+fn snapshot_message(snapshot: &Snapshot, session_id: Option<&str>) -> Value {
     let redact = host::setting_bool("redactEnvironment").unwrap_or(true);
     let interval = host::setting_number("autoRefreshSeconds")
         .unwrap_or(30.0)
         .max(0.0) as u64;
-    snapshot.view_json(redact, interval)
+    with_session(snapshot.view_json(redact, interval), session_id)
 }
 
-fn post_error(message: &str) -> Result<(), Error> {
-    host::post_view_message(VIEW, &json!({"op":"error","message":message}).to_string())
+fn message_session_id(value: &Value) -> Option<&str> {
+    value
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+}
+
+fn with_session(mut message: Value, session_id: Option<&str>) -> Value {
+    if let (Some(object), Some(session_id)) = (message.as_object_mut(), session_id) {
+        object.insert("sessionId".into(), Value::String(session_id.into()));
+    }
+    message
+}
+
+fn post_message(message: Value, session_id: Option<&str>) -> Result<(), Error> {
+    host::post_view_message(VIEW, &with_session(message, session_id).to_string())
+}
+
+fn post_error(message: &str, session_id: Option<&str>) -> Result<(), Error> {
+    post_message(json!({"op":"error","message":message}), session_id)
 }
 
 fn notify_run_error(task: Option<&str>, error: &Error) {
@@ -394,6 +451,7 @@ register_plugin!(
 mod tests {
     use super::*;
     use openidea_plugin::{ProcessOutput, mock::MockHost};
+    use std::{cell::Cell, rc::Rc};
 
     fn host_with_mise() -> MockHost {
         let host = MockHost::install().with_capabilities(&[
@@ -445,7 +503,7 @@ mod tests {
         let host = host_with_mise();
         let mut plugin = OpenideaMise::default();
         let snapshot = plugin.refresh(&host.invocation()).unwrap();
-        let message = snapshot_message(&snapshot).to_string();
+        let message = snapshot_message(&snapshot, None).to_string();
         assert!(!message.contains("\"secret\""));
         assert!(message.contains("••••••••"));
     }
@@ -525,12 +583,98 @@ mod tests {
     }
 
     #[test]
+    fn web_view_messages_are_scoped_to_the_requesting_frame() {
+        let host = host_with_mise();
+        let mut plugin = OpenideaMise::default();
+        plugin
+            .handle(
+                VIEW,
+                ViewEvent::Message(r#"{"op":"ready","sessionId":"window-project-session"}"#.into()),
+                &host.invocation(),
+            )
+            .unwrap();
+
+        let messages = host.view_messages();
+        let snapshot: Value = serde_json::from_str(&messages[0].1).unwrap();
+        assert_eq!(snapshot["sessionId"], "window-project-session");
+        assert_eq!(snapshot["project"], "/project");
+    }
+
+    #[test]
+    fn untrusted_project_offers_an_explicit_trust_flow() {
+        let host = MockHost::install().with_capabilities(&[
+            "project.read",
+            "storage",
+            "events",
+            "process:mise",
+        ]);
+        host.set_project_root(Some("/project"));
+        let trusted = Rc::new(Cell::new(false));
+        let process_trusted = trusted.clone();
+        host.on_process("mise", move |args, _| {
+            if args == ["--yes", "trust"] {
+                process_trusted.set(true);
+                return Ok(ProcessOutput {
+                    status: Some(0),
+                    stdout: "trusted".into(),
+                    stderr: String::new(),
+                });
+            }
+            if !process_trusted.get() {
+                return Ok(ProcessOutput {
+                    status: Some(1),
+                    stdout: String::new(),
+                    stderr: "Config files in /project/mise.toml are not trusted.".into(),
+                });
+            }
+            let stdout = match args {
+                [a, b, c] if a == "tasks" && b == "ls" && c == "--json" => "[]",
+                [a, b] if a == "ls" && b == "--json" => "{}",
+                [a, b] if a == "env" && b == "--json" => "{}",
+                _ => return Err(Error::Invalid(format!("unexpected mise args: {args:?}"))),
+            };
+            Ok(ProcessOutput {
+                status: Some(0),
+                stdout: stdout.into(),
+                stderr: String::new(),
+            })
+        });
+
+        let mut plugin = OpenideaMise::default();
+        plugin
+            .handle(
+                VIEW,
+                ViewEvent::Message(r#"{"op":"ready","sessionId":"trust-session"}"#.into()),
+                &host.invocation(),
+            )
+            .unwrap();
+        let first: Value = serde_json::from_str(&host.view_messages().last().unwrap().1).unwrap();
+        assert_eq!(first["trustRequired"], true);
+        assert_eq!(host.process_runs().len(), 1);
+
+        plugin
+            .handle(
+                VIEW,
+                ViewEvent::Message(r#"{"op":"trust","sessionId":"trust-session"}"#.into()),
+                &host.invocation(),
+            )
+            .unwrap();
+        let second: Value = serde_json::from_str(&host.view_messages().last().unwrap().1).unwrap();
+        assert_eq!(second["trustRequired"], false);
+        assert_eq!(second["sessionId"], "trust-session");
+        assert_eq!(host.process_runs()[1].args, ["--yes", "trust"]);
+    }
+
+    #[test]
     fn packaged_web_view_has_no_duplicate_mise_heading() {
         const PAGE: &str = include_str!("../web/index.html");
         const MANIFEST: &str = include_str!("../plugin.toml");
 
         assert!(PAGE.contains("<!doctype html>"));
         assert!(PAGE.contains("globalThis.openidea"));
+        assert!(PAGE.contains("sessionId"));
+        assert!(PAGE.contains(r#"send({op: "trust"})"#));
+        assert!(PAGE.contains("Cancel"));
         assert!(PAGE.contains(r#"id="refresh""#));
         assert!(!PAGE.contains("<strong>Mise</strong>"));
         assert!(MANIFEST.contains(r#"web = "web/index.html""#));

@@ -17,6 +17,15 @@ pub fn environment(project: &Project) -> Result<Vec<EnvironmentValue>, String> {
     run(project, &["env", "--json"]).and_then(|text| parse_environment(&text))
 }
 
+pub fn trust(project: &Project) -> Result<(), String> {
+    run(project, &["--yes", "trust"]).map(|_| ())
+}
+
+pub fn requires_trust(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("not trusted") || error.contains("untrusted-config")
+}
+
 fn run(project: &Project, args: &[&str]) -> Result<String, String> {
     let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
     let output = project
@@ -57,4 +66,18 @@ fn truncate(value: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &value[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_mise_trust_errors() {
+        assert!(requires_trust(
+            "mise ERROR Config files in /project/mise.toml are not trusted."
+        ));
+        assert!(requires_trust("untrusted-config: /project/.mise.toml"));
+        assert!(!requires_trust("mise was not found on PATH"));
+    }
 }

@@ -15,15 +15,16 @@
     }
     button, input { font: inherit; }
     .shell { display: grid; grid-template-rows: auto 1fr auto; min-height: 100vh; }
-    .refresh, .run, .reveal {
+    .refresh, .run, .reveal, .trust-action {
       border: 1px solid var(--openidea-border); border-radius: 5px;
       background: var(--openidea-bg-elevated); color: var(--openidea-fg);
       padding: 4px 9px; cursor: pointer;
     }
-    .refresh:hover, .run:hover, .reveal:hover { background: var(--openidea-bg-hover); }
-    .refresh:focus-visible, .run:focus-visible, .reveal:focus-visible, input:focus-visible {
+    .refresh:hover, .run:hover, .reveal:hover, .trust-action:hover { background: var(--openidea-bg-hover); }
+    .refresh:focus-visible, .run:focus-visible, .reveal:focus-visible, .trust-action:focus-visible, input:focus-visible {
       outline: 2px solid var(--openidea-focus-ring); outline-offset: 1px;
     }
+    button:disabled { cursor: default; opacity: .6; }
     .tabs {
       display: flex; align-items: center; gap: 2px;
       min-height: var(--openidea-corner-inset-height, 0);
@@ -56,6 +57,19 @@
     .error {
       border-left: 3px solid var(--openidea-warning); background: var(--openidea-bg-elevated);
       color: var(--openidea-fg); padding: 7px 9px;
+    }
+    .trust-prompt {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      border-left: 3px solid var(--openidea-warning); background: var(--openidea-bg-elevated);
+      color: var(--openidea-fg); padding: 9px 10px;
+    }
+    .trust-copy { flex: 1 1 360px; }
+    .trust-copy strong { display: block; margin-bottom: 3px; color: var(--openidea-fg-strong); }
+    .trust-actions { display: flex; gap: 7px; }
+    .trust-action.primary {
+      border-color: var(--openidea-accent);
+      background: var(--openidea-accent);
+      color: var(--openidea-fg-on-accent);
     }
     .empty { color: var(--openidea-fg-muted); padding: 20px 8px; text-align: center; }
     .footer { border-top: 1px solid var(--openidea-border); padding: 5px 10px; color: var(--openidea-fg-muted); }
@@ -150,6 +164,8 @@
       let selectedGraphTask = null;
       let timer = null;
       let bridge = null;
+      let trustDismissed = false;
+      const sessionId = `mise-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
       const byId = id => document.getElementById(id);
       const text = value => value == null ? "" : String(value);
       const make = (tag, className, value) => {
@@ -176,7 +192,7 @@
         if (!bridge || typeof bridge.postMessage !== "function") {
           throw new Error("OpenIDEA message bridge is unavailable");
         }
-        bridge.postMessage(JSON.stringify(value));
+        bridge.postMessage(JSON.stringify({...value, sessionId}));
       };
       const normalizeState = value => {
         const source = value && typeof value === "object" ? value : {};
@@ -195,6 +211,7 @@
           tools: list(source.tools),
           environment: list(source.environment),
           errors: list(source.errors).map(text),
+          trustRequired: Boolean(source.trustRequired),
           autoRefreshSeconds: Number(source.autoRefreshSeconds || 0),
           loading: Boolean(source.loading)
         };
@@ -559,8 +576,42 @@
         renderTools();
         renderEnvironment();
         const errors = byId("errors");
-        errors.replaceChildren(...(state.errors || []).map(error => make("div", "error", error)));
-        byId("footer").textContent = state.loading ? "Refreshing…" : "Data from the current project";
+        errors.replaceChildren();
+        if (state.trustRequired && !trustDismissed) {
+          const prompt = make("div", "trust-prompt");
+          const copy = make("div", "trust-copy");
+          copy.append(
+            make("strong", "", "Trust this project's Mise configuration?"),
+            make("span", "detail", "Mise will not load tasks, tools, or environment values until this configuration is trusted.")
+          );
+          const actions = make("div", "trust-actions");
+          const trust = make("button", "trust-action primary", state.loading ? "Trusting…" : "Trust");
+          trust.type = "button";
+          trust.disabled = state.loading;
+          trust.addEventListener("click", () => {
+            state = {...state, loading: true};
+            render();
+            send({op: "trust"});
+          });
+          const cancel = make("button", "trust-action", "Cancel");
+          cancel.type = "button";
+          cancel.disabled = state.loading;
+          cancel.addEventListener("click", () => {
+            trustDismissed = true;
+            render();
+          });
+          actions.append(trust, cancel);
+          prompt.append(copy, actions);
+          errors.append(prompt);
+        }
+        const messages = state.trustRequired && !trustDismissed
+          ? (state.errors || []).filter(error => !error.toLocaleLowerCase().includes("not trusted"))
+          : (state.errors || []);
+        errors.append(...messages.map(error => make("div", "error", error)));
+        const project = sourceName(state.project);
+        byId("footer").textContent = state.loading
+          ? "Refreshing…"
+          : project ? `Data from ${project}` : "Data from the current project";
         configureTimer();
       }
       function setTab(tab) {
@@ -573,7 +624,10 @@
         let next;
         try {
           next = JSON.parse(message);
+          if (next.sessionId != null && next.sessionId !== sessionId) return;
+          if (next.sessionId == null && next.project && state.project && next.project !== state.project) return;
           if (next.op === "snapshot") {
+            if (state.project !== text(next.project) || !next.trustRequired) trustDismissed = false;
             state = normalizeState(next);
             render();
             setTab(activeTab);
@@ -617,6 +671,10 @@
           render();
           setTab("tasks");
           send({op: "ready"});
+          window.addEventListener("focus", () => send({op: "sync"}));
+          document.addEventListener("visibilitychange", () => {
+            if (!document.hidden) send({op: "sync"});
+          });
         } catch (error) {
           showFatal(error);
         }
