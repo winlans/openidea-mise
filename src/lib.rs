@@ -7,19 +7,13 @@ mod toml_support;
 use crate::model::{MiseTask, Snapshot, task_configuration_id};
 use openidea_plugin::views::{View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Error, Event, EventKind, Invocation, NotificationLevel, Plugin, PluginRunConfiguration,
-    PluginRunTarget, RunConfigurations, host, register_plugin,
+    Error, Event, Invocation, NotificationLevel, Plugin, PluginRunConfiguration, PluginRunTarget,
+    RunConfigurations, host, register_plugin,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 const VIEW: &str = "mise";
-const CONFIG_FILES: [&str; 4] = [
-    "mise.toml",
-    ".mise.toml",
-    "mise.local.toml",
-    ".mise.local.toml",
-];
 
 #[derive(Default)]
 pub struct OpenideaMise {
@@ -35,24 +29,40 @@ impl OpenideaMise {
         Ok((project, root))
     }
 
-    fn snapshot(&mut self, root: &str) -> Snapshot {
-        if let Some(snapshot) = self.snapshots.get(root) {
+    fn root_and_context(
+        ctx: &Invocation,
+    ) -> Result<(openidea_plugin::Project, String, String), Error> {
+        let (project, root) = Self::root(ctx)?;
+        let context = if host::setting_bool("followEditorContext").unwrap_or(true) {
+            ctx.editor()
+                .map(|editor| context_directory(&root, &editor.path()))
+                .unwrap_or_else(|| root.clone())
+        } else {
+            root.clone()
+        };
+        Ok((project, root, context))
+    }
+
+    fn snapshot(&mut self, root: &str, context: &str) -> Snapshot {
+        let key = snapshot_key(root, context);
+        if let Some(snapshot) = self.snapshots.get(&key) {
             return snapshot.clone();
         }
-        let snapshot = state::load(root)
+        let snapshot = state::load(root, context)
             .ok()
             .flatten()
             .unwrap_or_else(|| Snapshot {
                 project: root.to_owned(),
+                context: context.to_owned(),
                 errors: vec!["Refresh to load Mise data for this project.".into()],
                 ..Default::default()
             });
-        self.snapshots.insert(root.to_owned(), snapshot.clone());
+        self.snapshots.insert(key, snapshot.clone());
         snapshot
     }
 
     fn snapshot_for_run_configurations(&mut self, root: &str) -> Snapshot {
-        let mut snapshot = self.snapshot(root);
+        let mut snapshot = self.snapshot(root, root);
         let Some(project) = host::project_of(root) else {
             return snapshot;
         };
@@ -61,13 +71,15 @@ impl OpenideaMise {
         // ever opened. Refresh just the inexpensive task list here so the
         // first Run/Debug chooser already contains the project's Mise tasks.
         // A transient CLI failure keeps the last good cache available.
-        match mise::tasks(&project) {
+        match mise::tasks(&project, root) {
             Ok(tasks) => {
                 snapshot.project = root.to_owned();
+                snapshot.context = root.to_owned();
                 snapshot.tasks = tasks;
                 snapshot.trust_required = false;
                 let _ = state::save(&snapshot);
-                self.snapshots.insert(root.to_owned(), snapshot.clone());
+                self.snapshots
+                    .insert(snapshot_key(root, root), snapshot.clone());
             }
             Err(error) if mise::requires_trust(&error) => {
                 snapshot.tasks.clear();
@@ -79,18 +91,24 @@ impl OpenideaMise {
         snapshot
     }
 
-    fn refresh(&mut self, ctx: &Invocation) -> Result<Snapshot, Error> {
-        let (project, root) = Self::root(ctx)?;
-        let mut snapshot = self.snapshot(&root);
-        snapshot.project = root.clone();
+    fn refresh_context(
+        &mut self,
+        project: &openidea_plugin::Project,
+        root: &str,
+        context: &str,
+    ) -> Snapshot {
+        let mut snapshot = self.snapshot(root, context);
+        snapshot.project = root.to_owned();
+        snapshot.context = context.to_owned();
         snapshot.errors.clear();
         snapshot.trust_required = false;
 
-        match mise::tasks(&project) {
+        match mise::tasks(project, context) {
             Ok(tasks) => snapshot.tasks = tasks,
             Err(error) if mise::requires_trust(&error) => {
                 snapshot.tasks.clear();
                 snapshot.tools.clear();
+                snapshot.configs.clear();
                 snapshot.environment.clear();
                 snapshot.trust_required = true;
                 snapshot.errors.push(
@@ -101,29 +119,39 @@ impl OpenideaMise {
             Err(error) => snapshot.errors.push(format!("Tasks: {error}")),
         }
         if !snapshot.trust_required {
-            match mise::tools(&project) {
+            match mise::tools(project, context) {
                 Ok(tools) => snapshot.tools = tools,
                 Err(error) => snapshot.errors.push(format!("Tools: {error}")),
             }
-            match mise::environment(&project) {
+            match mise::environment(project, context) {
                 Ok(environment) => snapshot.environment = environment,
                 Err(error) => {
                     snapshot.environment.clear();
                     snapshot.errors.push(format!("Environment: {error}"));
                 }
             }
+            match mise::config_files(project, context, root) {
+                Ok(configs) => snapshot.configs = configs,
+                Err(error) => snapshot.errors.push(format!("Configuration: {error}")),
+            }
         }
 
         if let Err(error) = state::save(&snapshot) {
             snapshot.errors.push(format!("Cache: {error}"));
         }
-        if let Err(error) = configure_run_target(&project)
+        if let Err(error) = configure_run_target(project)
             && !matches!(error, Error::Denied(_))
         {
             snapshot.errors.push(format!("Run target: {error}"));
         }
-        self.snapshots.insert(root, snapshot.clone());
-        Ok(snapshot)
+        self.snapshots
+            .insert(snapshot_key(root, context), snapshot.clone());
+        snapshot
+    }
+
+    fn refresh(&mut self, ctx: &Invocation) -> Result<Snapshot, Error> {
+        let (project, root, context) = Self::root_and_context(ctx)?;
+        Ok(self.refresh_context(&project, &root, &context))
     }
 
     fn post_snapshot(
@@ -131,24 +159,29 @@ impl OpenideaMise {
         ctx: &Invocation,
         refresh: bool,
         session_id: Option<&str>,
+        request_id: Option<u64>,
     ) -> Result<(), Error> {
-        let (_, root) = Self::root(ctx)?;
+        let (_, root, context) = Self::root_and_context(ctx)?;
         let snapshot = if refresh {
             self.refresh(ctx)?
         } else {
-            self.snapshot(&root)
+            self.snapshot(&root, &context)
         };
-        host::post_view_message(VIEW, &snapshot_message(&snapshot, session_id).to_string())
+        host::post_view_message(
+            VIEW,
+            &snapshot_message(&snapshot, session_id, request_id).to_string(),
+        )
     }
 
     fn trust_configuration(
         &mut self,
         ctx: &Invocation,
         session_id: Option<&str>,
+        request_id: Option<u64>,
     ) -> Result<(), Error> {
-        let (project, _) = Self::root(ctx)?;
-        mise::trust(&project).map_err(Error::Failed)?;
-        self.post_snapshot(ctx, true, session_id)
+        let (project, _, context) = Self::root_and_context(ctx)?;
+        mise::trust(&project, &context).map_err(Error::Failed)?;
+        self.post_snapshot(ctx, true, session_id, request_id)
     }
 
     fn run_task(
@@ -156,11 +189,11 @@ impl OpenideaMise {
         ctx: &Invocation,
         task_name: Option<&str>,
     ) -> Result<Option<String>, Error> {
-        let (_, root) = Self::root(ctx)?;
+        let (_, root, context) = Self::root_and_context(ctx)?;
         let task_name = match task_name {
             Some(name) => validate_task_name(name)?.to_owned(),
             None => {
-                let snapshot = self.snapshot(&root);
+                let snapshot = self.snapshot(&root, &context);
                 let items: Vec<_> = snapshot
                     .tasks
                     .iter()
@@ -181,53 +214,82 @@ impl OpenideaMise {
                 validate_task_name(name)?.to_owned()
             }
         };
-        match host::start_run(&task_configuration_id(&task_name), &[], false) {
-            Ok(operation) => Ok(Some(operation)),
-            Err(run_error) => {
-                let args = vec!["run".into(), task_name.clone()];
-                host::open_terminal(&format!("Mise: {task_name}"), "mise", &args).map_err(
-                    |terminal_error| {
-                        Error::Failed(format!(
-                            "could not run mise task {task_name}: Run tool: {run_error}; terminal fallback: {terminal_error}"
-                        ))
-                    },
-                )?;
-                host::notify(
-                    NotificationLevel::Info,
-                    "Mise task opened in terminal",
-                    &format!(
-                        "The Run configuration was unavailable, so `{task_name}` was started in a terminal."
-                    ),
-                );
-                Ok(Some(format!(
-                    "terminal:{}",
-                    task_configuration_id(&task_name)
-                )))
+        if same_path(&root, &context) {
+            match host::start_run(&task_configuration_id(&task_name), &[], false) {
+                Ok(operation) => return Ok(Some(operation)),
+                Err(run_error) => {
+                    return self.open_task_terminal(&task_name, &root, &context, Some(&run_error));
+                }
             }
         }
+        self.open_task_terminal(&task_name, &root, &context, None)
+    }
+
+    fn open_task_terminal(
+        &self,
+        task_name: &str,
+        root: &str,
+        context: &str,
+        run_error: Option<&Error>,
+    ) -> Result<Option<String>, Error> {
+        let mut args = Vec::new();
+        if !same_path(root, context) {
+            args.extend(["-C".into(), context.into()]);
+        }
+        args.extend(["run".into(), task_name.into()]);
+        host::open_terminal(&format!("Mise: {task_name}"), "mise", &args).map_err(
+            |terminal_error| {
+                Error::Failed(match run_error {
+                    Some(run_error) => format!(
+                        "could not run mise task {task_name}: Run tool: {run_error}; terminal fallback: {terminal_error}"
+                    ),
+                    None => format!(
+                        "could not run mise task {task_name} in {context}: {terminal_error}"
+                    ),
+                })
+            },
+        )?;
+        host::notify(
+            NotificationLevel::Info,
+            "Mise task opened in terminal",
+            &if same_path(root, context) {
+                format!(
+                    "The Run configuration was unavailable, so `{task_name}` was started in a terminal."
+                )
+            } else {
+                format!("`{task_name}` was started in the active Mise context `{context}`.")
+            },
+        );
+        Ok(Some(format!(
+            "terminal:{}",
+            task_configuration_id(task_name)
+        )))
     }
 
     fn invalidate(&mut self, ctx: &Invocation) {
         let Ok((_, root)) = Self::root(ctx) else {
             return;
         };
-        self.snapshots.remove(&root);
+        let prefix = format!("{}\0", normalize_path(&root));
+        self.snapshots.retain(|key, _| !key.starts_with(&prefix));
         state::delete(&root);
-        let _ = self.post_snapshot(ctx, true, None);
     }
 }
 
 impl Plugin for OpenideaMise {
     fn activate(&mut self, _ctx: &openidea_plugin::Context) -> Result<(), Error> {
         let globs = [
-            "**/mise.toml",
-            "**/.mise.toml",
-            "**/mise.local.toml",
-            "**/.mise.local.toml",
+            "**/mise*.toml",
+            "**/.mise*.toml",
+            "**/mise/**/*.toml",
+            "**/.mise/**/*.toml",
+            "**/.config/mise*.toml",
+            "**/.config/mise/**/*.toml",
+            "**/.miserc*.toml",
+            "**/.tool-versions",
         ];
         host::subscribe_paths("file-saved", &globs)?;
         host::subscribe_paths("files-changed", &globs)?;
-        host::subscribe(EventKind::EditorFocused)?;
         Ok(())
     }
 
@@ -243,7 +305,7 @@ impl Plugin for OpenideaMise {
                 Ok(None)
             }
             "refresh" => {
-                self.post_snapshot(ctx, true, None)?;
+                self.post_snapshot(ctx, true, None, None)?;
                 host::reveal_view(VIEW)?;
                 Ok(None)
             }
@@ -261,14 +323,14 @@ impl Plugin for OpenideaMise {
     fn handle_events(&mut self, events: &[Event], ctx: &Invocation) {
         for event in events {
             match event {
-                Event::FileSaved(path) if is_config_path(path) => self.invalidate(ctx),
+                Event::FileSaved(path) if is_hierarchy_path(path) => self.invalidate(ctx),
                 Event::FilesChanged(changes)
                     if changes
                         .created
                         .iter()
                         .chain(&changes.modified)
                         .chain(&changes.removed)
-                        .any(|path| is_config_path(path)) =>
+                        .any(|path| is_hierarchy_path(path)) =>
                 {
                     self.invalidate(ctx);
                 }
@@ -276,10 +338,6 @@ impl Plugin for OpenideaMise {
                     if let Ok((project, _)) = Self::root(ctx) {
                         let _ = configure_run_target(&project);
                     }
-                    let _ = self.post_snapshot(ctx, false, None);
-                }
-                Event::EditorFocused(_) => {
-                    let _ = self.post_snapshot(ctx, false, None);
                 }
                 _ => {}
             }
@@ -310,13 +368,18 @@ impl Views for OpenideaMise {
                     return Ok(());
                 };
                 let session_id = message_session_id(&value);
+                let request_id = message_request_id(&value);
                 match value.get("op").and_then(Value::as_str) {
-                    Some("ready") => self.post_snapshot(ctx, true, session_id),
-                    Some("refresh") => self.post_snapshot(ctx, true, session_id),
-                    Some("sync") => self.post_snapshot(ctx, false, session_id),
-                    Some("trust") => match self.trust_configuration(ctx, session_id) {
+                    Some(operation @ ("ready" | "refresh" | "sync")) => {
+                        let refresh = operation != "sync";
+                        match self.post_snapshot(ctx, refresh, session_id, request_id) {
+                            Ok(()) => Ok(()),
+                            Err(error) => post_error(&error.to_string(), session_id, request_id),
+                        }
+                    }
+                    Some("trust") => match self.trust_configuration(ctx, session_id, request_id) {
                         Ok(()) => Ok(()),
-                        Err(error) => post_error(&error.to_string(), session_id),
+                        Err(error) => post_error(&error.to_string(), session_id, request_id),
                     },
                     Some("runTask") => {
                         let name = value.get("task").and_then(Value::as_str);
@@ -324,10 +387,11 @@ impl Views for OpenideaMise {
                             Ok(_) => post_message(
                                 json!({"op":"runStarted","task":name.unwrap_or_default()}),
                                 session_id,
+                                request_id,
                             ),
                             Err(error) => {
                                 notify_run_error(name, &error);
-                                post_error(&error.to_string(), session_id)
+                                post_error(&error.to_string(), session_id, request_id)
                             }
                         }
                     }
@@ -335,19 +399,21 @@ impl Views for OpenideaMise {
                         let Some(name) = value.get("name").and_then(Value::as_str) else {
                             return Ok(());
                         };
-                        let (_, root) = Self::root(ctx)?;
-                        let snapshot = self.snapshot(&root);
+                        let (_, root, context) = Self::root_and_context(ctx)?;
+                        let snapshot = self.snapshot(&root, &context);
                         let Some(entry) =
                             snapshot.environment.iter().find(|entry| entry.name == name)
                         else {
                             return post_error(
                                 "environment value is no longer available",
                                 session_id,
+                                request_id,
                             );
                         };
                         post_message(
                             json!({"op":"environmentValue","name":entry.name,"value":entry.value}),
                             session_id,
+                            request_id,
                         )
                     }
                     _ => Ok(()),
@@ -381,6 +447,48 @@ fn run_configuration(project_root: &str, task: &MiseTask) -> PluginRunConfigurat
     }
 }
 
+fn snapshot_key(root: &str, context: &str) -> String {
+    format!("{}\0{}", comparable_path(root), comparable_path(context))
+}
+
+fn context_directory(root: &str, path: &str) -> String {
+    let root = normalize_path(root);
+    let path = normalize_path(path);
+    let root = root.trim_end_matches('/');
+    let comparable_root = comparable_path(root);
+    let comparable_path = comparable_path(&path);
+    if comparable_path != comparable_root
+        && !comparable_path.starts_with(&format!("{comparable_root}/"))
+    {
+        return root.to_owned();
+    }
+    let Some((directory, _)) = path.rsplit_once('/') else {
+        return root.to_owned();
+    };
+    if directory.len() < root.len() {
+        root.to_owned()
+    } else {
+        directory.to_owned()
+    }
+}
+
+fn normalize_path(path: &str) -> String {
+    path.replace('\\', "/").trim_end_matches('/').to_owned()
+}
+
+fn same_path(left: &str, right: &str) -> bool {
+    comparable_path(left) == comparable_path(right)
+}
+
+fn comparable_path(path: &str) -> String {
+    let normalized = normalize_path(path);
+    if normalized.as_bytes().get(1) == Some(&b':') || normalized.starts_with("//") {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
 fn configure_run_target(project: &openidea_plugin::Project) -> Result<(), Error> {
     if !host::setting_bool("registerRunTarget").unwrap_or(false) {
         host::unregister_run_target(project, "mise.exec");
@@ -400,12 +508,16 @@ fn configure_run_target(project: &openidea_plugin::Project) -> Result<(), Error>
     )
 }
 
-fn snapshot_message(snapshot: &Snapshot, session_id: Option<&str>) -> Value {
+fn snapshot_message(
+    snapshot: &Snapshot,
+    session_id: Option<&str>,
+    request_id: Option<u64>,
+) -> Value {
     let redact = host::setting_bool("redactEnvironment").unwrap_or(true);
     let interval = host::setting_number("autoRefreshSeconds")
         .unwrap_or(30.0)
         .max(0.0) as u64;
-    with_session(snapshot.view_json(redact, interval), session_id)
+    with_routing(snapshot.view_json(redact, interval), session_id, request_id)
 }
 
 fn message_session_id(value: &Value) -> Option<&str> {
@@ -415,19 +527,43 @@ fn message_session_id(value: &Value) -> Option<&str> {
         .filter(|id| !id.is_empty() && id.len() <= 128)
 }
 
-fn with_session(mut message: Value, session_id: Option<&str>) -> Value {
-    if let (Some(object), Some(session_id)) = (message.as_object_mut(), session_id) {
-        object.insert("sessionId".into(), Value::String(session_id.into()));
+fn message_request_id(value: &Value) -> Option<u64> {
+    value.get("requestId").and_then(Value::as_u64)
+}
+
+fn with_routing(mut message: Value, session_id: Option<&str>, request_id: Option<u64>) -> Value {
+    if let Some(object) = message.as_object_mut() {
+        if let Some(session_id) = session_id {
+            object.insert("sessionId".into(), Value::String(session_id.into()));
+        }
+        if let Some(request_id) = request_id {
+            object.insert("requestId".into(), Value::Number(request_id.into()));
+        }
     }
     message
 }
 
-fn post_message(message: Value, session_id: Option<&str>) -> Result<(), Error> {
-    host::post_view_message(VIEW, &with_session(message, session_id).to_string())
+fn post_message(
+    message: Value,
+    session_id: Option<&str>,
+    request_id: Option<u64>,
+) -> Result<(), Error> {
+    host::post_view_message(
+        VIEW,
+        &with_routing(message, session_id, request_id).to_string(),
+    )
 }
 
-fn post_error(message: &str, session_id: Option<&str>) -> Result<(), Error> {
-    post_message(json!({"op":"error","message":message}), session_id)
+fn post_error(
+    message: &str,
+    session_id: Option<&str>,
+    request_id: Option<u64>,
+) -> Result<(), Error> {
+    post_message(
+        json!({"op":"error","message":message}),
+        session_id,
+        request_id,
+    )
 }
 
 fn notify_run_error(task: Option<&str>, error: &Error) {
@@ -455,13 +591,51 @@ fn validate_task_name(name: &str) -> Result<&str, Error> {
 }
 
 fn is_config_path(path: &str) -> bool {
-    let file_name = path
-        .replace('\\', "/")
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    CONFIG_FILES.iter().any(|candidate| file_name == *candidate)
+    let path = normalize_path(path).to_ascii_lowercase();
+    let file_name = path.rsplit('/').next().unwrap_or_default();
+    let parent = path
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("");
+    if file_name.ends_with(".toml")
+        && (parent.contains("/mise/conf.d")
+            || parent.contains("/.mise/conf.d")
+            || parent.contains("/.config/mise/conf.d"))
+    {
+        return true;
+    }
+    let unhidden = file_name.strip_prefix('.').unwrap_or(file_name);
+    if unhidden == "mise.toml"
+        || unhidden == "mise.local.toml"
+        || (unhidden.starts_with("mise.") && unhidden.ends_with(".toml"))
+    {
+        return true;
+    }
+    if !(file_name == "config.toml"
+        || file_name == "config.local.toml"
+        || (file_name.starts_with("config.") && file_name.ends_with(".toml")))
+    {
+        return false;
+    }
+    parent.ends_with("/mise") || parent.ends_with("/.mise") || parent.ends_with("/.config/mise")
+}
+
+fn is_hierarchy_path(path: &str) -> bool {
+    if is_config_path(path) {
+        return true;
+    }
+    matches!(
+        normalize_path(path)
+            .to_ascii_lowercase()
+            .rsplit('/')
+            .next()
+            .unwrap_or_default(),
+        ".miserc.toml"
+            | ".miserc.local.toml"
+            | "miserc.toml"
+            | "miserc.local.toml"
+            | ".tool-versions"
+    )
 }
 
 register_plugin!(
@@ -500,6 +674,9 @@ mod tests {
                 [a, b] if a == "env" && b == "--json" => {
                     r#"{"API_TOKEN":"secret","PUBLIC_VALUE":"visible"}"#
                 }
+                [a, b, c] if a == "config" && b == "ls" && c == "--json" => {
+                    r#"[{"path":"/project/mise.toml","tools":["node"]}]"#
+                }
                 _ => return Err(Error::Invalid(format!("unexpected mise args: {args:?}"))),
             };
             Ok(ProcessOutput { status: Some(0), stdout: stdout.into(), stderr: String::new() })
@@ -523,7 +700,12 @@ mod tests {
 
         let mut reloaded = OpenideaMise::default();
         assert_eq!(reloaded.configurations("/project")[0].name, "build");
-        assert!(reloaded.snapshot("/project").environment.is_empty());
+        assert!(
+            reloaded
+                .snapshot("/project", "/project")
+                .environment
+                .is_empty()
+        );
     }
 
     #[test]
@@ -559,7 +741,7 @@ mod tests {
         let host = host_with_mise();
         let mut plugin = OpenideaMise::default();
         let snapshot = plugin.refresh(&host.invocation()).unwrap();
-        let message = snapshot_message(&snapshot, None).to_string();
+        let message = snapshot_message(&snapshot, None, None).to_string();
         assert!(!message.contains("\"secret\""));
         assert!(message.contains("••••••••"));
     }
@@ -645,7 +827,9 @@ mod tests {
         plugin
             .handle(
                 VIEW,
-                ViewEvent::Message(r#"{"op":"ready","sessionId":"window-project-session"}"#.into()),
+                ViewEvent::Message(
+                    r#"{"op":"ready","sessionId":"window-project-session","requestId":7}"#.into(),
+                ),
                 &host.invocation(),
             )
             .unwrap();
@@ -653,7 +837,36 @@ mod tests {
         let messages = host.view_messages();
         let snapshot: Value = serde_json::from_str(&messages[0].1).unwrap();
         assert_eq!(snapshot["sessionId"], "window-project-session");
+        assert_eq!(snapshot["requestId"], 7);
         assert_eq!(snapshot["project"], "/project");
+    }
+
+    #[test]
+    fn web_view_snapshot_failures_are_returned_to_the_requesting_frame() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage", "events"]);
+        host.set_project_root(None);
+        let mut plugin = OpenideaMise::default();
+
+        plugin
+            .handle(
+                VIEW,
+                ViewEvent::Message(
+                    r#"{"op":"ready","sessionId":"empty-window","requestId":11}"#.into(),
+                ),
+                &host.invocation(),
+            )
+            .unwrap();
+
+        let message: Value = serde_json::from_str(&host.view_messages().last().unwrap().1).unwrap();
+        assert_eq!(message["op"], "error");
+        assert_eq!(message["sessionId"], "empty-window");
+        assert_eq!(message["requestId"], 11);
+        assert!(
+            message["message"]
+                .as_str()
+                .unwrap()
+                .contains("open a project")
+        );
     }
 
     #[test]
@@ -687,6 +900,7 @@ mod tests {
                 [a, b, c] if a == "tasks" && b == "ls" && c == "--json" => "[]",
                 [a, b] if a == "ls" && b == "--json" => "{}",
                 [a, b] if a == "env" && b == "--json" => "{}",
+                [a, b, c] if a == "config" && b == "ls" && c == "--json" => "[]",
                 _ => return Err(Error::Invalid(format!("unexpected mise args: {args:?}"))),
             };
             Ok(ProcessOutput {
@@ -731,9 +945,12 @@ mod tests {
         assert!(PAGE.contains("<!doctype html>"));
         assert!(PAGE.contains("globalThis.openidea"));
         assert!(PAGE.contains("sessionId"));
+        assert!(PAGE.contains("latestRequestId"));
+        assert!(PAGE.contains("responseRequestId < latestRequestId"));
+        assert!(PAGE.contains("if (state.loading) return"));
         assert!(PAGE.contains("::-webkit-scrollbar-track"));
         assert!(PAGE.contains("scrollbar-color: var(--openidea-border) transparent"));
-        assert!(PAGE.contains(r#"send({op: "trust"})"#));
+        assert!(PAGE.contains(r#"requestSnapshot("trust", true)"#));
         assert!(PAGE.contains("Cancel"));
         assert!(PAGE.contains(r#"id="refresh""#));
         assert!(!PAGE.contains("<strong>Mise</strong>"));
@@ -747,13 +964,123 @@ mod tests {
             settings["properties"]["registerRunTarget"]["default"],
             false
         );
+        assert_eq!(
+            settings["properties"]["followEditorContext"]["default"],
+            true
+        );
     }
 
     #[test]
     fn config_names_are_detected_on_unix_and_windows() {
         assert!(is_config_path("/project/.mise.toml"));
         assert!(is_config_path(r"C:\project\mise.local.toml"));
+        assert!(is_config_path("/project/mise.dev.toml"));
+        assert!(is_config_path("/project/.mise.dev.local.toml"));
+        assert!(is_config_path("/project/.config/mise/config.toml"));
+        assert!(is_config_path("/project/.mise/conf.d/node.toml"));
         assert!(!is_config_path("/project/Cargo.toml"));
+    }
+
+    #[test]
+    fn active_editor_directory_drives_queries_and_nested_task_runs() {
+        let host = MockHost::install().with_capabilities(&[
+            "project.read",
+            "storage",
+            "events",
+            "process:mise",
+        ]);
+        host.set_project_root(Some("/project"));
+        host.open_editor("/project/backend/src/main.rs", "rust", "fn main() {}", &[]);
+        host.on_process("mise", |args, _| {
+            let stdout = match args {
+                [flag, context, a, b, c]
+                    if flag == "-C"
+                        && context == "/project/backend/src"
+                        && a == "tasks"
+                        && b == "ls"
+                        && c == "--json" =>
+                {
+                    r#"[{"name":"build","source":"/project/backend/mise.toml"}]"#
+                }
+                [flag, context, a, b]
+                    if flag == "-C"
+                        && context == "/project/backend/src"
+                        && a == "ls"
+                        && b == "--json" =>
+                {
+                    "{}"
+                }
+                [flag, context, a, b]
+                    if flag == "-C"
+                        && context == "/project/backend/src"
+                        && a == "env"
+                        && b == "--json" =>
+                {
+                    "{}"
+                }
+                [flag, context, a, b, c]
+                    if flag == "-C"
+                        && context == "/project/backend/src"
+                        && a == "config"
+                        && b == "ls"
+                        && c == "--json" =>
+                {
+                    r#"[{"path":"/project/backend/mise.toml"}]"#
+                }
+                _ => return Err(Error::Invalid(format!("unexpected mise args: {args:?}"))),
+            };
+            Ok(ProcessOutput {
+                status: Some(0),
+                stdout: stdout.into(),
+                stderr: String::new(),
+            })
+        });
+
+        let mut plugin = OpenideaMise::default();
+        let snapshot = plugin.refresh(&host.invocation()).unwrap();
+        assert_eq!(snapshot.context, "/project/backend/src");
+        assert_eq!(snapshot.tasks[0].name, "build");
+        assert_eq!(host.process_runs().len(), 4);
+        assert!(host.process_runs().iter().all(|run| {
+            run.args
+                .starts_with(&["-C".into(), "/project/backend/src".into()])
+        }));
+
+        plugin.run_task(&host.invocation(), Some("build")).unwrap();
+        assert_eq!(
+            host.terminals()[0].args,
+            ["-C", "/project/backend/src", "run", "build"]
+        );
+        assert!(host.configuration_runs().is_empty());
+    }
+
+    #[test]
+    fn editor_context_following_can_be_disabled() {
+        let host = host_with_mise();
+        host.open_editor("/project/backend/src/main.rs", "rust", "fn main() {}", &[]);
+        host.set_setting("followEditorContext", "false");
+
+        let snapshot = OpenideaMise::default().refresh(&host.invocation()).unwrap();
+
+        assert_eq!(snapshot.context, "/project");
+        assert_eq!(host.process_runs()[0].args, ["tasks", "ls", "--json"]);
+    }
+
+    #[test]
+    fn editor_context_is_limited_to_the_project_and_cross_platform_paths() {
+        assert_eq!(
+            context_directory("/project", "/project/backend/src/main.rs"),
+            "/project/backend/src"
+        );
+        assert_eq!(
+            context_directory("/project", "/other/backend/main.rs"),
+            "/project"
+        );
+        assert_eq!(
+            context_directory(r"C:\Project", r"c:\project\backend\main.rs"),
+            "c:/project/backend"
+        );
+        assert!(same_path(r"C:\Project", r"c:/project/"));
     }
 
     #[test]
@@ -761,7 +1088,7 @@ mod tests {
         let host = MockHost::install().with_capabilities(&["project.read", "storage", "events"]);
         host.set_project_root(Some("/project"));
         let snapshot = OpenideaMise::default().refresh(&host.invocation()).unwrap();
-        assert_eq!(snapshot.errors.len(), 3);
+        assert_eq!(snapshot.errors.len(), 4);
         assert!(
             snapshot
                 .errors

@@ -1,0 +1,24 @@
+[
+  {
+    "name": "build",
+    "aliases": ["b"],
+    "description": "Build the workspace",
+    "source": "/workspace/mise.toml",
+    "depends": ["lint"],
+    "depends_post": ["notify"],
+    "wait_for": [],
+    "dir": "/workspace",
+    "hide": false
+  },
+  {
+    "name": "lint",
+    "aliases": [],
+    "description": "Check formatting",
+    "source": "/workspace/mise.toml",
+    "depends": [],
+    "depends_post": [],
+    "wait_for": [],
+    "dir": "/workspace",
+    "hide": false
+  }
+]

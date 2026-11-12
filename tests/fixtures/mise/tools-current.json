@@ -1,0 +1,26 @@
+{
+  "node": [
+    {
+      "version": "22.12.0",
+      "requested_version": "22",
+      "source": {
+        "type": "mise.toml",
+        "path": "/workspace/mise.toml"
+      },
+      "installed": true,
+      "active": true
+    }
+  ],
+  "rust": [
+    {
+      "version": "1.90.0",
+      "requested_version": "stable",
+      "source": {
+        "type": "mise.toml",
+        "path": "/home/user/.config/mise/config.toml"
+      },
+      "installed": true,
+      "active": true
+    }
+  ]
+}

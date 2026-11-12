@@ -15,7 +15,6 @@ activation = [
   "on-command:*",
   "on-event:file-saved",
   "on-event:files-changed",
-  "on-event:editor-focused",
   "on-event:settings-changed",
 ]
 
@@ -47,7 +46,24 @@ web = "web/index.html"
 header = "none"
 
 [[contributes.runConfigurations]]
-files = ["mise.toml", ".mise.toml", "mise.local.toml", ".mise.local.toml"]
+files = [
+  "mise.toml",
+  ".mise.toml",
+  "mise.local.toml",
+  ".mise.local.toml",
+  "mise.dev.toml",
+  ".mise.dev.toml",
+  "mise.development.toml",
+  ".mise.development.toml",
+  "mise.test.toml",
+  ".mise.test.toml",
+  "mise.prod.toml",
+  ".mise.prod.toml",
+  "mise.production.toml",
+  ".mise.production.toml",
+  ".tool-versions",
+  ".miserc.toml",
+]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "hover"]

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "serve",
+    "description": "Start the development server",
+    "source": {
+      "path": "/workspace/apps/web/mise.toml",
+      "kind": "project"
+    },
+    "depends": [
+      {
+        "task": "build",
+        "args": ["--profile", "dev"]
+      }
+    ],
+    "depends_post": [
+      {
+        "name": "announce",
+        "env": {
+          "CHANNEL": "not-a-task"
+        }
+      }
+    ],
+    "wait_for": ["database"],
+    "dir": "/workspace/apps/web",
+    "hide": false,
+    "future_metadata": {
+      "scheduler": "parallel"
+    }
+  }
+]

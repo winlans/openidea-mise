@@ -158,6 +158,7 @@
       <button class="tab active" data-tab="tasks" type="button">Tasks <span id="task-count"></span></button>
       <button class="tab" data-tab="graph" type="button">Graph</button>
       <button class="tab" data-tab="tools" type="button">Tools <span id="tool-count"></span></button>
+      <button class="tab" data-tab="configuration" type="button">Configuration <span id="config-count"></span></button>
       <button class="tab" data-tab="environment" type="button">Environment <span id="env-count"></span></button>
       <span class="tabs-spacer"></span>
       <button id="refresh" class="refresh" type="button">Refresh</button>
@@ -167,6 +168,7 @@
       <div id="tasks"></div>
       <div id="graph" class="hidden"></div>
       <div id="tools" class="hidden"></div>
+      <div id="configuration" class="hidden"></div>
       <div id="environment" class="hidden"></div>
     </section>
     <div>
@@ -183,6 +185,7 @@
       let timer = null;
       let bridge = null;
       let trustDismissed = false;
+      let latestRequestId = 0;
       const sessionId = `mise-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
       const byId = id => document.getElementById(id);
       const text = value => value == null ? "" : String(value);
@@ -212,6 +215,15 @@
         }
         bridge.postMessage(JSON.stringify({...value, sessionId}));
       };
+      const requestSnapshot = (op, showLoading = false) => {
+        if (state.loading) return;
+        const requestId = ++latestRequestId;
+        state = {...state, loading: true};
+        if (showLoading) {
+          render();
+        }
+        send({op, requestId});
+      };
       const normalizeState = value => {
         const source = value && typeof value === "object" ? value : {};
         const list = candidate => Array.isArray(candidate) ? candidate : [];
@@ -219,6 +231,7 @@
         return {
           op: "snapshot",
           project: text(source.project),
+          context: text(source.context || source.project),
           tasks: list(source.tasks),
           graph: {
             nodes: list(graph.nodes),
@@ -227,6 +240,7 @@
             missing: list(graph.missing)
           },
           tools: list(source.tools),
+          configs: list(source.configs),
           environment: list(source.environment),
           errors: list(source.errors).map(text),
           trustRequired: Boolean(source.trustRequired),
@@ -549,6 +563,54 @@
         });
         host.append(grid);
       }
+      function renderConfiguration() {
+        const host = byId("configuration");
+        host.replaceChildren();
+        const configs = state.configs || [];
+        if (!configs.length) {
+          host.append(make("div", "empty", "No Mise configuration files reported for this context"));
+          return;
+        }
+
+        const intro = make("div", "detail");
+        intro.style.marginBottom = "10px";
+        intro.textContent = "Mise merges these files for the active directory. Task and tool Source columns show which file owns each effective value.";
+        const taskSources = new Map();
+        const toolSources = new Map();
+        (state.tasks || []).forEach(task => {
+          const path = text(task.source).replaceAll("\\", "/");
+          if (path) taskSources.set(path, (taskSources.get(path) || 0) + 1);
+        });
+        (state.tools || []).forEach(tool => {
+          const path = text(tool.source).replaceAll("\\", "/");
+          if (path) toolSources.set(path, (toolSources.get(path) || 0) + 1);
+        });
+
+        const grid = table(["Configuration", "Scope", "Tier", "Declared tools", "Effective values"]);
+        const body = grid.tBodies[0];
+        configs.forEach(config => {
+          const path = text(config.path).replaceAll("\\", "/");
+          const row = make("tr");
+          const name = make("td", "name", sourceName(path));
+          name.append(make("div", "detail", path));
+          const scope = text(config.scope || "inherited");
+          const tier = config.override_file ? "override" : text(config.tier);
+          const effective = [];
+          const taskCount = taskSources.get(path) || 0;
+          const toolCount = toolSources.get(path) || 0;
+          if (taskCount) effective.push(`${taskCount} task${taskCount === 1 ? "" : "s"}`);
+          if (toolCount) effective.push(`${toolCount} tool${toolCount === 1 ? "" : "s"}`);
+          row.append(
+            name,
+            make("td", "detail", scope),
+            make("td", config.override_file ? "status-ok" : "detail", tier || "normal"),
+            make("td", "detail", (config.tools || []).join(", ") || "—"),
+            make("td", effective.length ? "status-ok" : "detail", effective.join(", ") || "Inherited metadata")
+          );
+          body.append(row);
+        });
+        host.append(intro, grid);
+      }
       function renderEnvironment() {
         const host = byId("environment");
         host.replaceChildren();
@@ -581,17 +643,19 @@
         const seconds = Number(state.autoRefreshSeconds || 0);
         if (seconds > 0) {
           timer = setInterval(() => {
-            if (!document.hidden) send({op: "refresh"});
+            if (!document.hidden && !state.loading) requestSnapshot("refresh");
           }, Math.max(10, seconds) * 1000);
         }
       }
       function render() {
         byId("task-count").textContent = `(${(state.tasks || []).length})`;
         byId("tool-count").textContent = `(${(state.tools || []).length})`;
+        byId("config-count").textContent = `(${(state.configs || []).length})`;
         byId("env-count").textContent = `(${(state.environment || []).length})`;
         renderTasks();
         renderGraph();
         renderTools();
+        renderConfiguration();
         renderEnvironment();
         const errors = byId("errors");
         errors.replaceChildren();
@@ -607,9 +671,7 @@
           trust.type = "button";
           trust.disabled = state.loading;
           trust.addEventListener("click", () => {
-            state = {...state, loading: true};
-            render();
-            send({op: "trust"});
+            requestSnapshot("trust", true);
           });
           const cancel = make("button", "trust-action", "Cancel");
           cancel.type = "button";
@@ -627,15 +689,22 @@
           : (state.errors || []);
         errors.append(...messages.map(error => make("div", "error", error)));
         const project = sourceName(state.project);
+        const normalizedProject = text(state.project).replaceAll("\\", "/").replace(/\/+$/, "");
+        const normalizedContext = text(state.context).replaceAll("\\", "/").replace(/\/+$/, "");
+        const relativeContext = normalizedContext.startsWith(`${normalizedProject}/`)
+          ? normalizedContext.slice(normalizedProject.length + 1)
+          : "";
         byId("footer").textContent = state.loading
           ? "Refreshing…"
-          : project ? `Data from ${project}` : "Data from the current project";
+          : project
+            ? `Data from ${project}${relativeContext ? ` / ${relativeContext}` : ""}`
+            : "Data from the current project";
         configureTimer();
       }
       function setTab(tab) {
         activeTab = tab;
         document.querySelectorAll(".tab").forEach(button => button.classList.toggle("active", button.dataset.tab === tab));
-        ["tasks", "graph", "tools", "environment"].forEach(id => byId(id).classList.toggle("hidden", id !== tab));
+        ["tasks", "graph", "tools", "configuration", "environment"].forEach(id => byId(id).classList.toggle("hidden", id !== tab));
         byId("search-bar").classList.toggle("hidden", tab !== "tasks");
       }
       function handleMessage(message) {
@@ -643,7 +712,9 @@
         try {
           next = JSON.parse(message);
           if (next.sessionId != null && next.sessionId !== sessionId) return;
-          if (next.sessionId == null && next.project && state.project && next.project !== state.project) return;
+          if (next.sessionId == null && (!state.project || text(next.project) !== state.project)) return;
+          const responseRequestId = Number(next.requestId || 0);
+          if (responseRequestId && responseRequestId < latestRequestId) return;
           if (next.op === "snapshot") {
             if (state.project !== text(next.project) || !next.trustRequired) trustDismissed = false;
             state = normalizeState(next);
@@ -682,16 +753,16 @@
           );
           byId("search").addEventListener("input", renderTasks);
           byId("refresh").addEventListener("click", () => {
-            state.loading = true;
-            render();
-            send({op: "refresh"});
+            requestSnapshot("refresh", true);
           });
           render();
           setTab("tasks");
-          send({op: "ready"});
-          window.addEventListener("focus", () => send({op: "sync"}));
+          state.loading = false;
+          requestSnapshot("ready", true);
+          window.addEventListener("focus", () => requestSnapshot("sync"));
+          window.addEventListener("pageshow", () => requestSnapshot("sync"));
           document.addEventListener("visibilitychange", () => {
-            if (!document.hidden) send({op: "sync"});
+            if (!document.hidden) requestSnapshot("sync");
           });
         } catch (error) {
           showFatal(error);

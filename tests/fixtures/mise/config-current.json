@@ -1,0 +1,18 @@
+[
+  {
+    "path": "/workspace/apps/web/mise.local.toml",
+    "tools": ["node"],
+    "tier": "local",
+    "override": true
+  },
+  {
+    "path": "/workspace/mise.toml",
+    "tools": ["node", "rust"],
+    "tier": "project"
+  },
+  {
+    "path": "/home/user/.config/mise/config.toml",
+    "tools": ["rust"],
+    "tier": "global"
+  }
+]

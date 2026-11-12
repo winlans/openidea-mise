@@ -11,6 +11,10 @@ The port is implemented against OpenIDEA Plugin API 1.4 and runs as a sandboxed
 
 - Browse, search and run `mise` tasks from the Mise tool window.
 - Inspect installed tools and the environment reported by the current project.
+- Follow Mise's parent, global, local, environment-specific, and nested
+  configuration hierarchy from the active editor directory. The Configuration
+  tab shows the files reported by `mise config ls --json` and the effective
+  source of tasks and tools.
 - Visualize task dependencies, post-dependencies, wait-for edges, missing tasks,
   and cycles.
 - Complete and navigate task names in Mise TOML files, with task hover,
@@ -28,7 +32,8 @@ to plugin storage.
   open project and publish editor/indexing features.
 - `storage` caches task and tool metadata so editor features do not invoke a
   process. Environment values are deliberately excluded.
-- `events` invalidates that cache when Mise files or settings change.
+- `events` invalidates that cache when Mise files change and reacts to plugin
+  settings changes.
 - Optional `process:mise` runs the locally installed `mise` executable for
   refresh, tasks, generated run configurations, and the Mise Run Target. If
   this high-risk capability is denied, TOML editing features still work and the
@@ -37,7 +42,19 @@ to plugin storage.
 The `mise.exec` Run Target can be enabled in the plugin settings when other run
 configurations should be wrapped with `mise exec --`. It is opt-in because
 selecting it as OpenIDEA's project-wide default appends a target label to every
-run configuration.
+run configuration. OpenIDEA Plugin API 1.4 supports Run and Test through this
+target, but rejects Debug on plugin-provided targets.
+
+The tool window follows the focused editor directory by default. Disable
+**Follow the active editor directory** in the plugin settings to resolve all
+Mise data from the project root instead. Generated Run Configurations use the
+project-root context because OpenIDEA's configuration provider is project
+scoped; a task selected from a nested context is opened in a terminal with
+`mise -C <directory> run <task>`.
+
+When Mise reports an untrusted configuration, the tool window shows explicit
+**Trust** and **Cancel** actions. Trust invokes `mise --yes trust` in the active
+context, then refreshes the view.
 
 ## Development
 
@@ -69,6 +86,27 @@ mise run package-local
 It does not read or use the production publisher signing key. The signed
 release path remains `scripts/build-package.sh`. Verify the local artifact with
 `sha256sum -c dist/winlans.mise-<version>-local.oiplugin.sha256`.
+
+The project-level `mise.toml` pins Rust and exposes the complete build,
+validation, unsigned local packaging, and signed release packaging workflows.
+If Mise blocks the file on first use, review it and run `mise trust mise.toml`
+before invoking these tasks.
+
+## Troubleshooting
+
+- If tasks change when moving between folders, this is Mise's normal hierarchy
+  behavior. The footer shows the active directory context and the Configuration
+  tab shows the loaded chain.
+- If the Run/Debug selector does not show Mise tasks, ensure a supported
+  root-level marker such as `mise.toml`, `.mise.toml`, `.tool-versions`, or
+  `.miserc.toml` exists, the project is trusted, and the optional
+  `process:mise` capability is granted. Then refresh the project or reopen it.
+- The one-time “Use Mise” Run Target prompt is remembered by OpenIDEA per
+  project/plugin/target. Re-enabling the setting does not reset that answer;
+  choose Mise explicitly under Settings › Run Targets or a configuration's
+  **Run on** selector.
+- A selected plugin Run Target cannot be used for Debug in the current
+  OpenIDEA Plugin API. Use Local machine for Debug.
 
 See [the port plan](docs/openidea-mise-port-plan.md) for the staged feature and
 release roadmap. See [the release runbook](docs/releasing.md) for signing-key,

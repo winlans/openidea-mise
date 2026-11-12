@@ -59,7 +59,7 @@ pub fn completion(
     let before = line_prefix(line, at.character);
     let section = section_at_line(&doc.text, at.line);
 
-    if is_dependency_line(before) {
+    if is_dependency_line(before) || is_dependency_position(&doc.text, at) {
         let replace = word_range(&doc.text, at);
         let inside_string = replace
             .and_then(|range| text::offset(&doc.text, range.start))
@@ -101,7 +101,7 @@ pub fn definition(doc: &ProviderDocument, at: Position) -> Vec<Location> {
     else {
         return Vec::new();
     };
-    parsed
+    let local: Vec<_> = parsed
         .tasks
         .iter()
         .filter(|task| task.name == reference.name)
@@ -109,7 +109,38 @@ pub fn definition(doc: &ProviderDocument, at: Position) -> Vec<Location> {
             path: doc.path.clone(),
             range: task.name_range,
         })
-        .collect()
+        .collect();
+    let snapshot = cached_snapshot(&doc.path);
+    let effective = snapshot
+        .tasks
+        .iter()
+        .find(|task| task.name == reference.name);
+    let Some(effective) = effective else {
+        return local;
+    };
+    if effective.source.is_empty()
+        || same_document(&effective.source, &doc.path)
+        || effective
+            .source
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name == "<task>")
+    {
+        return local;
+    }
+    vec![Location {
+        path: effective.source.clone(),
+        range: Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 0,
+            },
+        },
+    }]
 }
 
 pub fn hover(doc: &ProviderDocument, at: Position) -> Option<Hover> {
@@ -136,6 +167,28 @@ pub fn hover(doc: &ProviderDocument, at: Position) -> Option<Hover> {
         }
         if !task.source.is_empty() {
             markdown.push_str(&format!("\n\nSource: `{}`", markdown_code(&task.source)));
+            if let Some(config) = cached_snapshot(&doc.path)
+                .configs
+                .into_iter()
+                .find(|config| same_document(&config.path, &task.source))
+            {
+                markdown.push_str(&format!("\n\nScope: {}", markdown_code(&config.scope)));
+                if config.override_file {
+                    markdown.push_str(" (override)");
+                } else if !config.tier.is_empty() {
+                    markdown.push_str(&format!(" ({})", markdown_code(&config.tier)));
+                }
+            }
+            if parsed
+                .tasks
+                .iter()
+                .any(|parsed_task| parsed_task.name == task.name)
+                && !same_document(&task.source, &doc.path)
+            {
+                markdown.push_str(
+                    "\n\nThis local definition is overridden in the active Mise context.",
+                );
+            }
         }
         return Some(Hover::new(markdown).range(range));
     }
@@ -162,6 +215,15 @@ pub fn hover(doc: &ProviderDocument, at: Position) -> Option<Hover> {
                 "\n\n- `{}` — {status}",
                 markdown_code(&version.version)
             ));
+            if !version.requested_version.is_empty() {
+                markdown.push_str(&format!(
+                    " (requested `{}`)",
+                    markdown_code(&version.requested_version)
+                ));
+            }
+            if !version.source.is_empty() {
+                markdown.push_str(&format!("\n  Source: `{}`", markdown_code(&version.source)));
+            }
         }
     }
     Some(Hover::new(markdown).range(tool.range))
@@ -299,6 +361,8 @@ fn parse_config(source: &str) -> ParsedConfig {
         let key_text = trimmed[..equal].trim();
         let value_relative = equal + 1;
         let value_absolute = offset + leading + value_relative;
+        let (value_start, value_end) = assignment_value_range(source, value_absolute);
+        let value_text = &source[value_start..value_end];
         match section {
             Section::Tools => {
                 if let Some((name, range)) = parse_key(source, key_text, offset + leading) {
@@ -307,23 +371,25 @@ fn parse_config(source: &str) -> ParsedConfig {
             }
             Section::Task(index) => {
                 let key = unquoted_key(key_text);
-                let strings =
-                    assignment_strings(source, &trimmed[value_relative..], value_absolute);
                 match key.as_str() {
                     "description" => {
+                        let strings = scan_strings(source, value_text, value_start);
                         if let Some(value) = strings.first() {
                             parsed.tasks[index].description = value.value.clone();
                         }
                     }
                     "depends" | "depends_post" | "wait_for" => {
-                        parsed
-                            .references
-                            .extend(strings.into_iter().map(|value| TaskReference {
-                                name: value.value,
-                                range: value.range,
-                            }));
+                        parsed.references.extend(
+                            dependency_strings(source, value_start, value_end)
+                                .into_iter()
+                                .map(|value| TaskReference {
+                                    name: value.value,
+                                    range: value.range,
+                                }),
+                        );
                     }
                     "run" | "script" => {
+                        let strings = scan_strings(source, value_text, value_start);
                         parsed
                             .scripts
                             .extend(strings.into_iter().map(|value| value.range));
@@ -402,14 +468,69 @@ struct StringValue {
     end: usize,
 }
 
-fn assignment_strings(source: &str, line_value: &str, absolute: usize) -> Vec<StringValue> {
-    let leading = line_value.len() - line_value.trim_start().len();
-    let start = absolute + leading;
-    let value = line_value.trim_start();
-    if value.starts_with("\"\"\"") || value.starts_with("'''") {
-        return parse_string_at(source, start).into_iter().collect();
+fn assignment_value_range(source: &str, absolute: usize) -> (usize, usize) {
+    let mut start = absolute.min(source.len());
+    while source
+        .as_bytes()
+        .get(start)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        start += 1;
     }
-    scan_strings(source, value, start)
+    let Some(first) = source.as_bytes().get(start).copied() else {
+        return (start, start);
+    };
+    if matches!(first, b'"' | b'\'') {
+        return parse_string_at(source, start)
+            .map(|value| (start, value.end))
+            .unwrap_or((start, start));
+    }
+    if !matches!(first, b'[' | b'{') {
+        let end = source[start..]
+            .find(['\r', '\n', '#'])
+            .map_or(source.len(), |relative| start + relative);
+        return (start, end);
+    }
+
+    let mut stack = Vec::new();
+    let mut cursor = start;
+    while cursor < source.len() {
+        let byte = source.as_bytes()[cursor];
+        if matches!(byte, b'"' | b'\'')
+            && let Some(value) = parse_string_at(source, cursor)
+        {
+            cursor = value.end;
+            continue;
+        }
+        if byte == b'#' {
+            cursor = source[cursor..]
+                .find('\n')
+                .map_or(source.len(), |relative| cursor + relative + 1);
+            continue;
+        }
+        match byte {
+            b'[' | b'{' => stack.push(byte),
+            b']' if stack.last() == Some(&b'[') => {
+                stack.pop();
+                if stack.is_empty() {
+                    return (start, cursor + 1);
+                }
+            }
+            b'}' if stack.last() == Some(&b'{') => {
+                stack.pop();
+                if stack.is_empty() {
+                    return (start, cursor + 1);
+                }
+            }
+            _ => {}
+        }
+        cursor += source[cursor..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(1);
+    }
+    (start, source.len())
 }
 
 fn scan_strings(source: &str, value: &str, absolute: usize) -> Vec<StringValue> {
@@ -435,6 +556,65 @@ fn scan_strings(source: &str, value: &str, absolute: usize) -> Vec<StringValue> 
             .unwrap_or(1);
     }
     result
+}
+
+fn dependency_strings(source: &str, start: usize, end: usize) -> Vec<StringValue> {
+    let mut result = Vec::new();
+    let mut cursor = start;
+    let mut object_starts = Vec::new();
+    while cursor < end {
+        let byte = source.as_bytes()[cursor];
+        if byte == b'#' {
+            cursor = source[cursor..end]
+                .find('\n')
+                .map_or(end, |relative| cursor + relative + 1);
+            continue;
+        }
+        if matches!(byte, b'"' | b'\'')
+            && let Some(value) = parse_string_at(source, cursor)
+        {
+            if value.end > end {
+                break;
+            }
+            let after = source[value.end..end].trim_start();
+            let quoted_key = after.starts_with('=');
+            let accepted = if object_starts.is_empty() {
+                true
+            } else {
+                !quoted_key
+                    && inline_value_key(source, *object_starts.last().unwrap(), cursor)
+                        .is_some_and(|key| matches!(key.as_str(), "task" | "name"))
+            };
+            if accepted {
+                result.push(value.clone());
+            }
+            cursor = value.end;
+            continue;
+        }
+        match byte {
+            b'{' => object_starts.push(cursor),
+            b'}' => {
+                object_starts.pop();
+            }
+            _ => {}
+        }
+        cursor += source[cursor..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(1);
+    }
+    result
+}
+
+fn inline_value_key(source: &str, object_start: usize, value_start: usize) -> Option<String> {
+    let before = &source[object_start + 1..value_start];
+    let field = before
+        .rsplit_once(',')
+        .map_or(before, |(_, field)| field)
+        .trim();
+    let (key, _) = field.rsplit_once('=')?;
+    Some(unquoted_key(key))
 }
 
 fn parse_string_at(source: &str, start: usize) -> Option<StringValue> {
@@ -546,7 +726,16 @@ fn cached_snapshot(path: &str) -> Snapshot {
     let Ok(root) = project.root() else {
         return Snapshot::default();
     };
-    state::load(&root).ok().flatten().unwrap_or_default()
+    let context = if host::setting_bool("followEditorContext").unwrap_or(true) {
+        crate::context_directory(&root, path)
+    } else {
+        root.clone()
+    };
+    state::load(&root, &context)
+        .ok()
+        .flatten()
+        .or_else(|| state::load(&root, &root).ok().flatten())
+        .unwrap_or_default()
 }
 
 fn task_name_at(parsed: &ParsedConfig, at: Position) -> Option<(&str, Range)> {
@@ -588,16 +777,24 @@ fn tool_name_completions(path: &str, source: &str, at: Position) -> Vec<Completi
 }
 
 fn task_field_completions(source: &str, at: Position) -> Vec<CompletionItem> {
-    const FIELDS: [(&str, &str, bool); 10] = [
+    const FIELDS: [(&str, &str, bool); 18] = [
         ("description", "description = \"$0\"", true),
         ("run", "run = \"$0\"", true),
+        ("script", "script = \"$0\"", true),
         ("depends", "depends = [\"$0\"]", true),
         ("depends_post", "depends_post = [\"$0\"]", true),
         ("wait_for", "wait_for = [\"$0\"]", true),
         ("dir", "dir = \"$0\"", true),
+        ("tools", "tools = { ${1:node} = \"$0\" }", true),
         ("sources", "sources = [\"$0\"]", true),
         ("outputs", "outputs = [\"$0\"]", true),
+        ("shell", "shell = \"$0\"", true),
+        ("file", "file = \"$0\"", true),
         ("hide", "hide = ${1:false}", true),
+        ("silent", "silent = ${1:false}", true),
+        ("raw", "raw = ${1:false}", true),
+        ("confirm", "confirm = \"$0\"", true),
+        ("alias", "alias = \"$0\"", true),
         ("env", "[tasks.${1:name}.env]\n$0", true),
     ];
     let replace = word_range(source, at);
@@ -622,6 +819,12 @@ fn top_level_completions(source: &str, at: Position) -> Vec<CompletionItem> {
         ),
         ("Mise tools", "[tools]\n${1:node} = \"$0\""),
         ("Mise environment", "[env]\n${1:NAME} = \"$0\""),
+        ("Mise variables", "[vars]\n${1:NAME} = \"$0\""),
+        ("Mise settings", "[settings]\n${1:key} = $0"),
+        ("Mise hooks", "[hooks]\n${1:hook} = \"$0\""),
+        ("Mise aliases", "[alias.${1:tool}]\n${2:name} = \"$0\""),
+        ("Mise plugins", "[plugins]\n${1:tool} = \"$0\""),
+        ("Minimum Mise version", "min_version = \"$0\""),
     ]
     .into_iter()
     .map(|(label, insert)| {
@@ -673,6 +876,53 @@ fn is_dependency_line(prefix: &str) -> bool {
         unquoted_key(key).as_str(),
         "depends" | "depends_post" | "wait_for"
     )
+}
+
+fn is_dependency_position(source: &str, at: Position) -> bool {
+    let Some(cursor) = text::offset(source, at) else {
+        return false;
+    };
+    let mut section = Section::Other;
+    let mut offset = 0usize;
+    let mut skip_until = 0usize;
+    for raw_line in source.split_inclusive('\n') {
+        if offset > cursor {
+            break;
+        }
+        if offset < skip_until {
+            offset += raw_line.len();
+            continue;
+        }
+        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let leading = line.len() - line.trim_start().len();
+        let trimmed = line.trim_start();
+        if let Some(header) = parse_header(source, trimmed, offset + leading) {
+            section = match header {
+                Header::Task { .. } => Section::Task(0),
+                _ => Section::Other,
+            };
+            offset += raw_line.len();
+            continue;
+        }
+        let Some(equal) = assignment_equal(trimmed) else {
+            offset += raw_line.len();
+            continue;
+        };
+        let key = unquoted_key(trimmed[..equal].trim());
+        let value_absolute = offset + leading + equal + 1;
+        let (start, end) = assignment_value_range(source, value_absolute);
+        skip_until = end;
+        if matches!(section, Section::Task(_))
+            && matches!(key.as_str(), "depends" | "depends_post" | "wait_for")
+            && start <= cursor
+            && cursor <= end
+        {
+            return true;
+        }
+        offset += raw_line.len();
+    }
+    false
 }
 
 fn word_range(source: &str, at: Position) -> Option<Range> {
@@ -727,6 +977,10 @@ fn contains(range: Range, at: Position) -> bool {
 
 fn markdown_code(value: &str) -> String {
     value.replace('`', "\\`")
+}
+
+fn same_document(left: &str, right: &str) -> bool {
+    left.replace('\\', "/").trim_end_matches('/') == right.replace('\\', "/").trim_end_matches('/')
 }
 
 #[cfg(test)]
@@ -819,6 +1073,7 @@ run = ["pnpm install", "pnpm build"]
 
     #[test]
     fn definition_resolves_a_dependency_in_the_same_file() {
+        let _host = MockHost::install().with_capabilities(&["project.read", "storage"]);
         let doc = provider_doc();
         let line = doc
             .text
@@ -836,6 +1091,151 @@ run = ["pnpm install", "pnpm build"]
         let start = text::offset(&doc.text, locations[0].range.start).unwrap();
         let end = text::offset(&doc.text, locations[0].range.end).unwrap();
         assert_eq!(&doc.text[start..end], "lint");
+    }
+
+    #[test]
+    fn multiline_dependencies_only_index_task_fields_from_objects() {
+        let parsed = parse_config(
+            r#"[tasks.build]
+depends = [
+  "lint",
+  { task = "server", args = ["--port", "3000"] },
+  { name = "prepare", env = { TARGET = "not-a-task" } },
+]
+"#,
+        );
+
+        assert_eq!(
+            parsed
+                .references
+                .iter()
+                .map(|reference| reference.name.as_str())
+                .collect::<Vec<_>>(),
+            ["lint", "server", "prepare"]
+        );
+    }
+
+    #[test]
+    fn dependency_completion_works_on_multiline_array_entries() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage"]);
+        host.set_project_root(Some("/project"));
+        state::save(&Snapshot {
+            project: "/project".into(),
+            context: "/project".into(),
+            tasks: vec![MiseTask {
+                name: "lint".into(),
+                description: "Check formatting".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let doc = ProviderDocument {
+            path: "/project/mise.toml".into(),
+            language: "toml".into(),
+            version: 1,
+            text: "[tasks.build]\ndepends = [\n  \"\"\n]\n".into(),
+        };
+
+        let items = completion(
+            &doc,
+            Position {
+                line: 2,
+                character: 3,
+            },
+            None,
+        );
+
+        assert!(items.iter().any(|item| item.label == "lint"));
+    }
+
+    #[test]
+    fn definition_prefers_the_effective_inherited_task_source() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage"]);
+        host.set_project_root(Some("/project"));
+        state::save(&Snapshot {
+            project: "/project".into(),
+            context: "/project/backend".into(),
+            tasks: vec![MiseTask {
+                name: "lint".into(),
+                source: "/project/mise.toml".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let doc = ProviderDocument {
+            path: "/project/backend/mise.toml".into(),
+            language: "toml".into(),
+            version: 1,
+            text: "[tasks.build]\ndepends = [\"lint\"]\n".into(),
+        };
+
+        let locations = definition(
+            &doc,
+            Position {
+                line: 1,
+                character: 13,
+            },
+        );
+
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].path, "/project/mise.toml");
+        assert_eq!(
+            locations[0].range,
+            Range {
+                start: Position {
+                    line: 0,
+                    character: 0
+                },
+                end: Position {
+                    line: 0,
+                    character: 0
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn hover_marks_a_local_task_overridden_by_the_effective_source() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage"]);
+        host.set_project_root(Some("/project"));
+        state::save(&Snapshot {
+            project: "/project".into(),
+            context: "/project/backend".into(),
+            tasks: vec![MiseTask {
+                name: "build".into(),
+                description: "Effective build".into(),
+                source: "/project/mise.toml".into(),
+                ..Default::default()
+            }],
+            configs: vec![crate::model::MiseConfigFile {
+                path: "/project/mise.toml".into(),
+                scope: "project".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let doc = ProviderDocument {
+            path: "/project/backend/mise.toml".into(),
+            language: "toml".into(),
+            version: 1,
+            text: "[tasks.build]\nrun = \"echo local\"\n".into(),
+        };
+
+        let result = hover(
+            &doc,
+            Position {
+                line: 0,
+                character: 8,
+            },
+        )
+        .unwrap();
+
+        assert!(result.markdown.contains("Scope: project"));
+        assert!(result.markdown.contains("overridden"));
+        assert!(result.markdown.contains("/project/mise.toml"));
     }
 
     #[test]

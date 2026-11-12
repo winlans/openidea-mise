@@ -1,0 +1,6 @@
+{
+  "APP_ENV": "development",
+  "FEATURE_FLAGS": ["search", "checkout"],
+  "HTTP_PORT": 5173,
+  "OPTIONAL_VALUE": null
+}

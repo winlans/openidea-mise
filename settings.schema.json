@@ -12,6 +12,12 @@
       "description": "Mask values whose names look like passwords, tokens, keys, cookies or credentials.",
       "default": true
     },
+    "followEditorContext": {
+      "type": "boolean",
+      "title": "Follow the active editor directory",
+      "description": "Resolve Mise's parent, local, environment, and nested configuration hierarchy from the active editor's directory. Disable to always use the project root.",
+      "default": true
+    },
     "registerRunTarget": {
       "type": "boolean",
       "title": "Offer Mise as a run target",
