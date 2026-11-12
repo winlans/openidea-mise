@@ -51,6 +51,34 @@ impl OpenideaMise {
         snapshot
     }
 
+    fn snapshot_for_run_configurations(&mut self, root: &str) -> Snapshot {
+        let mut snapshot = self.snapshot(root);
+        let Some(project) = host::project_of(root) else {
+            return snapshot;
+        };
+
+        // Run configurations may be requested before the Mise tool window has
+        // ever opened. Refresh just the inexpensive task list here so the
+        // first Run/Debug chooser already contains the project's Mise tasks.
+        // A transient CLI failure keeps the last good cache available.
+        match mise::tasks(&project) {
+            Ok(tasks) => {
+                snapshot.project = root.to_owned();
+                snapshot.tasks = tasks;
+                snapshot.trust_required = false;
+                let _ = state::save(&snapshot);
+                self.snapshots.insert(root.to_owned(), snapshot.clone());
+            }
+            Err(error) if mise::requires_trust(&error) => {
+                snapshot.tasks.clear();
+                snapshot.trust_required = true;
+            }
+            Err(_) => {}
+        }
+        let _ = configure_run_target(&project);
+        snapshot
+    }
+
     fn refresh(&mut self, ctx: &Invocation) -> Result<Snapshot, Error> {
         let (project, root) = Self::root(ctx)?;
         let mut snapshot = self.snapshot(&root);
@@ -332,7 +360,7 @@ impl Views for OpenideaMise {
 
 impl RunConfigurations for OpenideaMise {
     fn configurations(&mut self, project_root: &str) -> Vec<PluginRunConfiguration> {
-        let snapshot = self.snapshot(project_root);
+        let snapshot = self.snapshot_for_run_configurations(project_root);
         snapshot
             .tasks
             .iter()
@@ -496,6 +524,20 @@ mod tests {
         let mut reloaded = OpenideaMise::default();
         assert_eq!(reloaded.configurations("/project")[0].name, "build");
         assert!(reloaded.snapshot("/project").environment.is_empty());
+    }
+
+    #[test]
+    fn run_configurations_load_tasks_before_the_tool_window_opens() {
+        let host = host_with_mise();
+        let mut plugin = OpenideaMise::default();
+
+        let configs = plugin.configurations("/project");
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "build");
+        assert_eq!(configs[0].args, ["run", "build"]);
+        assert_eq!(host.process_runs().len(), 1);
+        assert_eq!(host.process_runs()[0].args, ["tasks", "ls", "--json"]);
     }
 
     #[test]
