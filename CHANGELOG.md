@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/winlans/openidea-mise/compare/v0.1.0...v0.1.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* keep completion ranges on unicode boundaries ([8bcdaee](https://github.com/winlans/openidea-mise/commit/8bcdaeeb75749097b491ca4bdedb6852d1b63104))
+
 ## 0.1.0 (2026-11-16)
 
 
