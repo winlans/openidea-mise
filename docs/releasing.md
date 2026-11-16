@@ -44,7 +44,7 @@ gh repo fork l0ng-ai/openidea-plugins --clone=false
 
 ## 首次生成 publisher key
 
-使用 OpenIDEA v0.1.40 的 CLI：
+使用 OpenIDEA v0.1.45 的 CLI：
 
 ```sh
 scripts/install-openidea-plugin.sh
@@ -54,7 +54,7 @@ chmod 0600 ~/.config/openidea-mise/signing.key
 base64 -w 0 ~/.config/openidea-mise/signing.key
 ```
 
-安装脚本固定校验 v0.1.40 Linux x86_64 release asset 的 SHA-256。升级 CLI
+安装脚本固定校验 v0.1.45 Linux x86_64 release asset 的 SHA-256。升级 CLI
 版本时必须在脚本中审查并更新摘要；临时测试其他版本时可显式设置
 `OPENIDEA_CLI_SHA256`，不要跳过校验。
 

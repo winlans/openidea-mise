@@ -4,7 +4,7 @@ Mise integration for OpenIDEA. The plugin provides a project task center,
 installed-tool and environment inspection, dynamic run configurations, Mise TOML
 navigation and a `mise exec` run target.
 
-The port is implemented against OpenIDEA Plugin API 1.4 and runs as a sandboxed
+The port is implemented against OpenIDEA Plugin API 1.8 and runs as a sandboxed
 `wasm32-wasip2` component.
 
 ## Features
@@ -19,8 +19,16 @@ The port is implemented against OpenIDEA Plugin API 1.4 and runs as a sandboxed
   and cycles.
 - Complete and navigate task names in Mise TOML files, with task hover,
   Rename/Find Usages indexing, Run gutter actions, and Shell script injection.
+- Show Mise-aware Structure entries, live diagnostics, and semantic highlighting
+  while editing unsaved TOML documents.
+- Recognize Mise File Tasks under `mise-tasks`, `.mise-tasks`, `mise/tasks`,
+  `.mise/tasks`, and `.config/mise/tasks`, including `#MISE` metadata completion,
+  dependency navigation, diagnostics, highlighting, and Run gutter actions.
+- Apply the official Mise icon dynamically to recognized configuration files,
+  File Task folders, and File Task sources in the project tree.
 - Use generated run configurations named exactly after each task. The optional
-  `mise.exec` Run Target is disabled by default so task labels stay compact.
+  `mise.exec` Run Target is disabled by default so task labels stay compact; its
+  pre-launch validation rejects untrusted or out-of-project working directories.
 
 Environment variables whose names look sensitive are masked by default. A
 revealed value remains in the current tool-window session and is never written
@@ -30,6 +38,8 @@ to plugin storage.
 
 - `project.read` lets the plugin associate Mise configuration files with the
   open project and publish editor/indexing features.
+- `editor.read` lets document-change events invalidate Mise state without
+  forcing the user to save before live editor providers are recomputed.
 - `storage` caches task and tool metadata so editor features do not invoke a
   process. Environment values are deliberately excluded.
 - `events` invalidates that cache when Mise files change and reacts to plugin
@@ -42,7 +52,7 @@ to plugin storage.
 The `mise.exec` Run Target can be enabled in the plugin settings when other run
 configurations should be wrapped with `mise exec --`. It is opt-in because
 selecting it as OpenIDEA's project-wide default appends a target label to every
-run configuration. OpenIDEA Plugin API 1.4 supports Run and Test through this
+run configuration. OpenIDEA Plugin API 1.8 supports Run and Test through this
 target, but rejects Debug on plugin-provided targets.
 
 The tool window follows the focused editor directory by default. Disable
@@ -62,7 +72,7 @@ Requirements:
 
 - Rust 1.98.1 with `wasm32-wasip2`
 - `mise`
-- the `openidea-plugin` CLI from OpenIDEA v0.1.40
+- the `openidea-plugin` CLI from OpenIDEA v0.1.45
 
 Common commands:
 

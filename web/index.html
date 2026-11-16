@@ -731,6 +731,12 @@
             });
           } else if (next.op === "runStarted") {
             byId("footer").textContent = `Started ${text(next.task)}`;
+          } else if (next.op === "invalidate") {
+            if (next.refresh) {
+              if (!state.loading) requestSnapshot("refresh");
+            } else {
+              byId("footer").textContent = "Mise configuration has unsaved changes";
+            }
           } else if (next.op === "error") {
             const errors = [...(state.errors || []), text(next.message)];
             state = {...state, loading: false, errors};

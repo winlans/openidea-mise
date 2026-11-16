@@ -1,15 +1,18 @@
 use crate::model::{MiseTask, MiseTool, Snapshot};
-use crate::{is_config_path, state};
+use crate::{is_config_path, is_file_task_path, state};
+use openidea_plugin::diagnostics::DiagnosticsProvider;
 use openidea_plugin::hover::{Hover, HoverProvider};
 use openidea_plugin::indexing::{Anchor, Document as IndexDocument, DocumentIndexer, Edges};
 use openidea_plugin::language_features::{
-    Document as FeatureDocument, GutterAction, Injection, Injections, LanguageFeatures,
+    Document as FeatureDocument, DocumentSymbol, GutterAction, Injection, Injections,
+    LanguageFeatures,
 };
 use openidea_plugin::providers::{
     CompletionItem, CompletionKind, Document as ProviderDocument, Providers,
 };
-use openidea_plugin::{Location, Position, Range, host, text};
-use std::collections::BTreeMap;
+use openidea_plugin::semantic_tokens::{SemanticToken, SemanticTokens, TokenKind, TokenModifier};
+use openidea_plugin::{Diagnostic, Location, Position, Range, Severity, host, text};
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -17,6 +20,7 @@ struct ParsedConfig {
     tasks: Vec<ParsedTask>,
     references: Vec<TaskReference>,
     tools: Vec<ParsedTool>,
+    environment: Vec<ParsedEnvironment>,
     scripts: Vec<Range>,
 }
 
@@ -32,6 +36,7 @@ struct ParsedTask {
 struct TaskReference {
     name: String,
     range: Range,
+    owner: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,9 +45,16 @@ struct ParsedTool {
     range: Range,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ParsedEnvironment {
+    name: String,
+    range: Range,
+}
+
 enum Section {
     Other,
     Tools,
+    Environment,
     Task(usize),
 }
 
@@ -51,7 +63,10 @@ pub fn completion(
     at: Position,
     _trigger: Option<&str>,
 ) -> Vec<CompletionItem> {
-    if !is_mise_document(&doc.path) {
+    if is_mise_file_task(doc) {
+        return file_task_completion(doc, at);
+    }
+    if !is_mise_config_document(&doc.path) {
         return Vec::new();
     }
     let parsed = parse_config(&doc.text);
@@ -90,7 +105,10 @@ pub fn completion(
 }
 
 pub fn definition(doc: &ProviderDocument, at: Position) -> Vec<Location> {
-    if !is_mise_document(&doc.path) {
+    if is_mise_file_task(doc) {
+        return file_task_definition(doc, at);
+    }
+    if !is_mise_config_document(&doc.path) {
         return Vec::new();
     }
     let parsed = parse_config(&doc.text);
@@ -144,7 +162,10 @@ pub fn definition(doc: &ProviderDocument, at: Position) -> Vec<Location> {
 }
 
 pub fn hover(doc: &ProviderDocument, at: Position) -> Option<Hover> {
-    if !is_mise_document(&doc.path) {
+    if is_mise_file_task(doc) {
+        return file_task_hover(doc, at);
+    }
+    if !is_mise_config_document(&doc.path) {
         return None;
     }
     let parsed = parse_config(&doc.text);
@@ -230,7 +251,19 @@ pub fn hover(doc: &ProviderDocument, at: Position) -> Option<Hover> {
 }
 
 pub fn gutter_actions(doc: &FeatureDocument) -> Vec<GutterAction> {
-    if !is_mise_document(&doc.path) {
+    if is_mise_file_task(doc) {
+        let Some(name) = file_task_name(&doc.path) else {
+            return Vec::new();
+        };
+        return vec![GutterAction {
+            line: file_task_gutter_line(&doc.text),
+            icon: Some("run".into()),
+            tooltip: format!("Run mise task {name}"),
+            command: "run-task".into(),
+            argument: Some(name),
+        }];
+    }
+    if !is_mise_config_document(&doc.path) {
         return Vec::new();
     }
     parse_config(&doc.text)
@@ -247,7 +280,7 @@ pub fn gutter_actions(doc: &FeatureDocument) -> Vec<GutterAction> {
 }
 
 pub fn injections(doc: &FeatureDocument) -> Vec<Injection> {
-    if !is_mise_document(&doc.path) {
+    if !is_mise_config_document(&doc.path) {
         return Vec::new();
     }
     parse_config(&doc.text)
@@ -262,7 +295,22 @@ pub fn injections(doc: &FeatureDocument) -> Vec<Injection> {
 }
 
 pub fn index(doc: &IndexDocument) -> Edges {
-    if !is_mise_document(&doc.path) {
+    if is_mise_file_task_path(&doc.path) {
+        let parsed = parse_file_task(&doc.text);
+        return Edges {
+            definitions: Vec::new(),
+            references: parsed
+                .references
+                .into_iter()
+                .map(|reference| Anchor {
+                    key: task_key(&reference.name),
+                    range: reference.range,
+                })
+                .collect(),
+            ..Default::default()
+        };
+    }
+    if !is_mise_config_document(&doc.path) {
         return Edges::default();
     }
     let parsed = parse_config(&doc.text);
@@ -304,6 +352,10 @@ impl HoverProvider for crate::OpenideaMise {
 }
 
 impl LanguageFeatures for crate::OpenideaMise {
+    fn document_symbols(&mut self, doc: &FeatureDocument) -> Vec<DocumentSymbol> {
+        document_symbols(doc)
+    }
+
     fn gutter_actions(&mut self, doc: &FeatureDocument) -> Vec<GutterAction> {
         gutter_actions(doc)
     }
@@ -319,6 +371,564 @@ impl DocumentIndexer for crate::OpenideaMise {
     fn index(&mut self, doc: &IndexDocument) -> Edges {
         index(doc)
     }
+}
+
+impl DiagnosticsProvider for crate::OpenideaMise {
+    fn diagnostics(&mut self, doc: &ProviderDocument) -> Vec<Diagnostic> {
+        diagnostics(doc)
+    }
+}
+
+impl SemanticTokens for crate::OpenideaMise {
+    fn semantic_tokens(&mut self, doc: &ProviderDocument) -> Vec<SemanticToken> {
+        semantic_tokens(doc)
+    }
+}
+
+fn document_symbols(doc: &FeatureDocument) -> Vec<DocumentSymbol> {
+    if !is_mise_config_document(&doc.path) {
+        return Vec::new();
+    }
+    let parsed = parse_config(&doc.text);
+    let document_range = byte_range(&doc.text, 0, doc.text.len());
+    let mut symbols = Vec::new();
+
+    if !parsed.tools.is_empty() {
+        let parent = symbols.len() as u32;
+        symbols.push(DocumentSymbol {
+            name: "Tools".into(),
+            detail: format!("{} configured", parsed.tools.len()),
+            kind: "module".into(),
+            range: document_range,
+            selection_range: parsed.tools[0].range,
+            parent: None,
+        });
+        symbols.extend(parsed.tools.into_iter().map(|tool| DocumentSymbol {
+            name: tool.name,
+            detail: "Mise tool".into(),
+            kind: "property".into(),
+            range: tool.range,
+            selection_range: tool.range,
+            parent: Some(parent),
+        }));
+    }
+
+    if !parsed.tasks.is_empty() {
+        let parent = symbols.len() as u32;
+        symbols.push(DocumentSymbol {
+            name: "Tasks".into(),
+            detail: format!("{} configured", parsed.tasks.len()),
+            kind: "module".into(),
+            range: document_range,
+            selection_range: parsed.tasks[0].name_range,
+            parent: None,
+        });
+        symbols.extend(parsed.tasks.into_iter().map(|task| DocumentSymbol {
+            name: task.name,
+            detail: if task.description.is_empty() {
+                "Mise task".into()
+            } else {
+                task.description
+            },
+            kind: "function".into(),
+            range: task.name_range,
+            selection_range: task.name_range,
+            parent: Some(parent),
+        }));
+    }
+
+    if !parsed.environment.is_empty() {
+        let parent = symbols.len() as u32;
+        symbols.push(DocumentSymbol {
+            name: "Environment".into(),
+            detail: format!("{} variables", parsed.environment.len()),
+            kind: "module".into(),
+            range: document_range,
+            selection_range: parsed.environment[0].range,
+            parent: None,
+        });
+        symbols.extend(
+            parsed
+                .environment
+                .into_iter()
+                .map(|environment| DocumentSymbol {
+                    name: environment.name,
+                    detail: "Mise environment variable".into(),
+                    kind: "variable".into(),
+                    range: environment.range,
+                    selection_range: environment.range,
+                    parent: Some(parent),
+                }),
+        );
+    }
+
+    symbols
+}
+
+fn diagnostics(doc: &ProviderDocument) -> Vec<Diagnostic> {
+    if is_mise_file_task(doc) {
+        return file_task_diagnostics(doc);
+    }
+    if !is_mise_config_document(&doc.path) {
+        return Vec::new();
+    }
+
+    let mut diagnostics = Vec::new();
+    if let Err(error) = toml_edit::DocumentMut::from_str(&doc.text) {
+        let range = error
+            .span()
+            .map(|span| byte_range(&doc.text, span.start, span.end))
+            .unwrap_or_else(|| byte_range(&doc.text, 0, 0));
+        diagnostics.push(
+            Diagnostic::new(range, Severity::Error, error.to_string()).code("mise.invalid-toml"),
+        );
+    }
+
+    let parsed = parse_config(&doc.text);
+    let mut definitions = BTreeMap::new();
+    for task in &parsed.tasks {
+        if definitions
+            .insert(task.name.as_str(), task.name_range)
+            .is_some()
+        {
+            diagnostics.push(
+                Diagnostic::new(
+                    task.name_range,
+                    Severity::Error,
+                    format!("Mise task `{}` is defined more than once.", task.name),
+                )
+                .code("mise.duplicate-task"),
+            );
+        }
+    }
+
+    let snapshot = cached_snapshot(&doc.path);
+    let available: BTreeSet<_> = parsed
+        .tasks
+        .iter()
+        .map(|task| task.name.as_str())
+        .chain(snapshot.tasks.iter().map(|task| task.name.as_str()))
+        .collect();
+    let adjacency = task_adjacency(&parsed);
+    for reference in &parsed.references {
+        if reference.name == reference.owner {
+            diagnostics.push(
+                Diagnostic::new(
+                    reference.range,
+                    Severity::Error,
+                    format!("Mise task `{}` cannot depend on itself.", reference.owner),
+                )
+                .code("mise.self-dependency"),
+            );
+        } else if !available.contains(reference.name.as_str()) {
+            diagnostics.push(
+                Diagnostic::new(
+                    reference.range,
+                    Severity::Warning,
+                    format!("Mise task `{}` cannot be resolved.", reference.name),
+                )
+                .code("mise.unresolved-task"),
+            );
+        } else if dependency_closes_cycle(&reference.owner, &reference.name, &adjacency) {
+            diagnostics.push(
+                Diagnostic::new(
+                    reference.range,
+                    Severity::Error,
+                    format!(
+                        "Dependency `{}` creates a cycle containing `{}`.",
+                        reference.name, reference.owner
+                    ),
+                )
+                .code("mise.dependency-cycle"),
+            );
+        }
+    }
+
+    for task in &parsed.tasks {
+        if let Some(effective) = snapshot
+            .tasks
+            .iter()
+            .find(|effective| effective.name == task.name)
+            && !effective.source.is_empty()
+            && !same_document(&effective.source, &doc.path)
+        {
+            diagnostics.push(
+                Diagnostic::new(
+                    task.name_range,
+                    Severity::Hint,
+                    format!(
+                        "This definition is overridden by the active Mise source `{}`.",
+                        effective.source
+                    ),
+                )
+                .code("mise.overridden-task"),
+            );
+        }
+    }
+    diagnostics
+}
+
+fn semantic_tokens(doc: &ProviderDocument) -> Vec<SemanticToken> {
+    if is_mise_file_task(doc) {
+        return file_task_semantic_tokens(doc);
+    }
+    if !is_mise_config_document(&doc.path) {
+        return Vec::new();
+    }
+    let parsed = parse_config(&doc.text);
+    let mut tokens = Vec::new();
+    tokens.extend(parsed.tasks.into_iter().map(|task| {
+        SemanticToken::new(task.name_range, TokenKind::Function).modifier(TokenModifier::Definition)
+    }));
+    tokens.extend(
+        parsed
+            .references
+            .into_iter()
+            .map(|reference| SemanticToken::new(reference.range, TokenKind::Function)),
+    );
+    tokens.extend(
+        parsed
+            .tools
+            .into_iter()
+            .map(|tool| SemanticToken::new(tool.range, TokenKind::Property)),
+    );
+    tokens.extend(
+        parsed
+            .environment
+            .into_iter()
+            .map(|entry| SemanticToken::new(entry.range, TokenKind::Variable)),
+    );
+    tokens.sort_by_key(|token| (token.range.start.line, token.range.start.character));
+    tokens
+}
+
+fn task_adjacency(parsed: &ParsedConfig) -> BTreeMap<&str, Vec<&str>> {
+    let mut adjacency: BTreeMap<&str, Vec<&str>> = parsed
+        .tasks
+        .iter()
+        .map(|task| (task.name.as_str(), Vec::new()))
+        .collect();
+    for reference in &parsed.references {
+        adjacency
+            .entry(reference.owner.as_str())
+            .or_default()
+            .push(reference.name.as_str());
+    }
+    adjacency
+}
+
+fn dependency_closes_cycle(
+    owner: &str,
+    dependency: &str,
+    adjacency: &BTreeMap<&str, Vec<&str>>,
+) -> bool {
+    let mut pending = vec![dependency];
+    let mut visited = BTreeSet::new();
+    while let Some(task) = pending.pop() {
+        if task == owner {
+            return true;
+        }
+        if !visited.insert(task) {
+            continue;
+        }
+        if let Some(dependencies) = adjacency.get(task) {
+            pending.extend(dependencies.iter().copied());
+        }
+    }
+    false
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ParsedFileTask {
+    metadata: Vec<FileTaskMetadata>,
+    references: Vec<TaskReference>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FileTaskMetadata {
+    key: String,
+    key_range: Range,
+}
+
+const FILE_TASK_OPTIONS: [(&str, &str, &str); 14] = [
+    ("alias", "string | string[]", "Alias for this task"),
+    (
+        "depends",
+        "string | string[]",
+        "Tasks to run before this task",
+    ),
+    (
+        "depends_post",
+        "string | string[]",
+        "Tasks to run after this task",
+    ),
+    (
+        "wait_for",
+        "string | string[]",
+        "Tasks whose completion this task waits for",
+    ),
+    ("description", "string", "Description of this task"),
+    ("dir", "string", "Working directory for this task"),
+    ("env", "table", "Environment variables for this task"),
+    ("tools", "table", "Tools activated for this task"),
+    ("hide", "bool", "Hide this task from listings"),
+    ("outputs", "string | string[]", "Files created by this task"),
+    ("quiet", "bool", "Hide Mise status output"),
+    ("sources", "string | string[]", "Input files for this task"),
+    ("shell", "string", "Shell used to run this task"),
+    ("usage", "string", "Usage specification for task arguments"),
+];
+
+fn parse_file_task(source: &str) -> ParsedFileTask {
+    let mut parsed = ParsedFileTask::default();
+    let mut offset = 0usize;
+    for raw_line in source.split_inclusive('\n') {
+        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let leading = line.len() - line.trim_start().len();
+        let trimmed = line.trim_start();
+        let Some(metadata) = trimmed.strip_prefix("#MISE ") else {
+            offset += raw_line.len();
+            continue;
+        };
+        let Some(equal) = assignment_equal(metadata) else {
+            offset += raw_line.len();
+            continue;
+        };
+        let raw_key = metadata[..equal].trim();
+        if raw_key.is_empty() {
+            offset += raw_line.len();
+            continue;
+        }
+        let metadata_absolute = offset + leading + "#MISE ".len();
+        let key_leading = metadata[..equal].len() - metadata[..equal].trim_start().len();
+        let key_start = metadata_absolute + key_leading;
+        let value_start = metadata_absolute + equal + 1;
+        let value_end = offset + line.len();
+        let key = unquoted_key(raw_key);
+        parsed.metadata.push(FileTaskMetadata {
+            key: key.clone(),
+            key_range: byte_range(source, key_start, key_start + raw_key.len()),
+        });
+        if matches!(key.as_str(), "depends" | "depends_post" | "wait_for") {
+            parsed.references.extend(
+                dependency_strings(source, value_start.min(value_end), value_end)
+                    .into_iter()
+                    .map(|value| TaskReference {
+                        name: value.value,
+                        range: value.range,
+                        owner: String::new(),
+                    }),
+            );
+        }
+        offset += raw_line.len();
+    }
+    parsed
+}
+
+fn file_task_completion(doc: &ProviderDocument, at: Position) -> Vec<CompletionItem> {
+    let line = line_text(&doc.text, at.line).unwrap_or_default();
+    let prefix = line_prefix(line, at.character);
+    let Some(metadata) = prefix.trim_start().strip_prefix("#MISE ") else {
+        return Vec::new();
+    };
+    let key = metadata
+        .split_once('=')
+        .map(|(key, _)| unquoted_key(key))
+        .unwrap_or_default();
+    if matches!(key.as_str(), "depends" | "depends_post" | "wait_for") && metadata.contains('=') {
+        let replace = word_range(&doc.text, at);
+        let inside_string = replace
+            .and_then(|range| text::offset(&doc.text, range.start))
+            .is_some_and(|offset| {
+                offset > 0 && matches!(doc.text.as_bytes()[offset - 1], b'"' | b'\'')
+            });
+        return task_names(&doc.path, &ParsedConfig::default())
+            .into_values()
+            .map(|task| {
+                let mut item = CompletionItem::new(&task.name, CompletionKind::Reference);
+                item.detail = Some(task.description);
+                item.insert_text = if inside_string {
+                    task.name.clone()
+                } else {
+                    format!("\"{}\"", task.name)
+                };
+                item.replace = replace;
+                item
+            })
+            .collect();
+    }
+    let replace = word_range(&doc.text, at);
+    FILE_TASK_OPTIONS
+        .into_iter()
+        .map(|(name, value_type, description)| {
+            let mut item = CompletionItem::new(name, CompletionKind::Property);
+            item.detail = Some(format!("{value_type} — {description}"));
+            item.insert_text = name.into();
+            item.replace = replace;
+            item
+        })
+        .collect()
+}
+
+fn file_task_definition(doc: &ProviderDocument, at: Position) -> Vec<Location> {
+    let parsed = parse_file_task(&doc.text);
+    let Some(reference) = parsed
+        .references
+        .iter()
+        .find(|reference| contains(reference.range, at))
+    else {
+        return Vec::new();
+    };
+    cached_snapshot(&doc.path)
+        .tasks
+        .into_iter()
+        .find(|task| task.name == reference.name && !task.source.is_empty())
+        .map(|task| {
+            vec![Location {
+                path: task.source,
+                range: Range::default(),
+            }]
+        })
+        .unwrap_or_default()
+}
+
+fn file_task_hover(doc: &ProviderDocument, at: Position) -> Option<Hover> {
+    let parsed = parse_file_task(&doc.text);
+    if let Some(reference) = parsed
+        .references
+        .iter()
+        .find(|reference| contains(reference.range, at))
+    {
+        let task = task_names(&doc.path, &ParsedConfig::default()).remove(&reference.name)?;
+        let mut markdown = format!("**Mise task** `{}`", markdown_code(&task.name));
+        if !task.description.is_empty() {
+            markdown.push_str(&format!("\n\n{}", task.description));
+        }
+        if !task.source.is_empty() {
+            markdown.push_str(&format!("\n\nSource: `{}`", markdown_code(&task.source)));
+        }
+        return Some(Hover::new(markdown).range(reference.range));
+    }
+    if let Some(metadata) = parsed
+        .metadata
+        .iter()
+        .find(|metadata| contains(metadata.key_range, at))
+        && let Some((_, value_type, description)) = FILE_TASK_OPTIONS
+            .iter()
+            .find(|(name, _, _)| *name == metadata.key)
+    {
+        return Some(
+            Hover::new(format!(
+                "**Mise File Task metadata** `{}`\n\n{}\n\nType: `{}`",
+                markdown_code(&metadata.key),
+                description,
+                markdown_code(value_type)
+            ))
+            .range(metadata.key_range),
+        );
+    }
+    let name = file_task_name(&doc.path)?;
+    Some(Hover::new(format!(
+        "**Mise File Task** `{}`\n\nSource: `{}`",
+        markdown_code(&name),
+        markdown_code(&doc.path)
+    )))
+}
+
+fn file_task_diagnostics(doc: &ProviderDocument) -> Vec<Diagnostic> {
+    let parsed = parse_file_task(&doc.text);
+    let name = file_task_name(&doc.path).unwrap_or_default();
+    let snapshot = cached_snapshot(&doc.path);
+    let has_task_catalog = !snapshot.tasks.is_empty();
+    let available: BTreeSet<_> = snapshot.tasks.into_iter().map(|task| task.name).collect();
+    let known: BTreeSet<_> = FILE_TASK_OPTIONS.iter().map(|(name, _, _)| *name).collect();
+    let mut diagnostics = Vec::new();
+    for metadata in &parsed.metadata {
+        if !known.contains(metadata.key.as_str()) {
+            diagnostics.push(
+                Diagnostic::new(
+                    metadata.key_range,
+                    Severity::Warning,
+                    format!("Unknown Mise File Task metadata `{}`.", metadata.key),
+                )
+                .code("mise.unknown-file-task-metadata"),
+            );
+        }
+    }
+    for reference in parsed.references {
+        if reference.name == name {
+            diagnostics.push(
+                Diagnostic::new(
+                    reference.range,
+                    Severity::Error,
+                    format!("Mise task `{name}` cannot depend on itself."),
+                )
+                .code("mise.self-dependency"),
+            );
+        } else if has_task_catalog && !available.contains(&reference.name) {
+            diagnostics.push(
+                Diagnostic::new(
+                    reference.range,
+                    Severity::Warning,
+                    format!("Mise task `{}` cannot be resolved.", reference.name),
+                )
+                .code("mise.unresolved-task"),
+            );
+        }
+    }
+    diagnostics
+}
+
+fn file_task_semantic_tokens(doc: &ProviderDocument) -> Vec<SemanticToken> {
+    let parsed = parse_file_task(&doc.text);
+    let mut tokens: Vec<_> = parsed
+        .metadata
+        .into_iter()
+        .map(|metadata| SemanticToken::new(metadata.key_range, TokenKind::Property))
+        .chain(
+            parsed
+                .references
+                .into_iter()
+                .map(|reference| SemanticToken::new(reference.range, TokenKind::Function)),
+        )
+        .collect();
+    tokens.sort_by_key(|token| (token.range.start.line, token.range.start.character));
+    tokens
+}
+
+fn file_task_gutter_line(source: &str) -> u32 {
+    source
+        .lines()
+        .position(|line| {
+            let line = line.trim();
+            !line.is_empty() && !line.starts_with("#!") && !line.starts_with("#MISE ")
+        })
+        .unwrap_or(0) as u32
+}
+
+fn is_mise_file_task(doc: &ProviderDocument) -> bool {
+    doc.language == "shellscript"
+        && (is_mise_file_task_path(&doc.path)
+            || cached_snapshot(&doc.path)
+                .tasks
+                .iter()
+                .any(|task| same_document(&task.source, &doc.path)))
+}
+
+fn is_mise_file_task_path(path: &str) -> bool {
+    is_file_task_path(path)
+}
+
+fn file_task_name(path: &str) -> Option<String> {
+    if let Some(task) = cached_snapshot(path)
+        .tasks
+        .into_iter()
+        .find(|task| same_document(&task.source, path))
+    {
+        return Some(task.name);
+    }
+    crate::file_task_name(path)
 }
 
 fn parse_config(source: &str) -> ParsedConfig {
@@ -338,6 +948,7 @@ fn parse_config(source: &str) -> ParsedConfig {
         if let Some(header) = parse_header(source, trimmed, offset + leading) {
             section = match header {
                 Header::Tools => Section::Tools,
+                Header::Environment => Section::Environment,
                 Header::Task { name, range } => {
                     let task = ParsedTask {
                         name,
@@ -369,6 +980,11 @@ fn parse_config(source: &str) -> ParsedConfig {
                     parsed.tools.push(ParsedTool { name, range });
                 }
             }
+            Section::Environment => {
+                if let Some((name, range)) = parse_key(source, key_text, offset + leading) {
+                    parsed.environment.push(ParsedEnvironment { name, range });
+                }
+            }
             Section::Task(index) => {
                 let key = unquoted_key(key_text);
                 match key.as_str() {
@@ -385,6 +1001,7 @@ fn parse_config(source: &str) -> ParsedConfig {
                                 .map(|value| TaskReference {
                                     name: value.value,
                                     range: value.range,
+                                    owner: parsed.tasks[index].name.clone(),
                                 }),
                         );
                     }
@@ -406,6 +1023,7 @@ fn parse_config(source: &str) -> ParsedConfig {
 
 enum Header {
     Tools,
+    Environment,
     Task { name: String, range: Range },
     Other,
 }
@@ -418,6 +1036,9 @@ fn parse_header(source: &str, trimmed: &str, absolute: usize) -> Option<Header> 
     let inner = trimmed[1..close].trim();
     if inner == "tools" {
         return Some(Header::Tools);
+    }
+    if inner == "env" {
+        return Some(Header::Environment);
     }
     let raw_name = inner.strip_prefix("tasks.")?.trim();
     if raw_name.is_empty() {
@@ -956,7 +1577,7 @@ fn unquoted_key(value: &str) -> String {
     trimmed.to_owned()
 }
 
-fn is_mise_document(path: &str) -> bool {
+fn is_mise_config_document(path: &str) -> bool {
     is_config_path(path)
 }
 
@@ -1254,6 +1875,184 @@ depends = [
         };
         assert!(gutter_actions(&other).is_empty());
         assert!(injections(&other).is_empty());
+    }
+
+    #[test]
+    fn structure_view_groups_tools_tasks_and_environment() {
+        let doc = FeatureDocument {
+            path: "/project/mise.toml".into(),
+            language: "toml".into(),
+            version: 1,
+            text: format!("{CONFIG}\n[env]\nNODE_ENV = \"test\"\n"),
+        };
+
+        let symbols = document_symbols(&doc);
+
+        let roots: Vec<_> = symbols
+            .iter()
+            .filter(|symbol| symbol.parent.is_none())
+            .map(|symbol| symbol.name.as_str())
+            .collect();
+        assert_eq!(roots, ["Tools", "Tasks", "Environment"]);
+        assert!(
+            symbols
+                .iter()
+                .any(|symbol| symbol.name == "build:web" && symbol.kind == "function")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|symbol| symbol.name == "NODE_ENV" && symbol.kind == "variable")
+        );
+    }
+
+    #[test]
+    fn diagnostics_report_invalid_unresolved_and_cyclic_tasks() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage"]);
+        host.set_project_root(Some("/project"));
+        let unresolved = ProviderDocument {
+            path: "/project/mise.toml".into(),
+            language: "toml".into(),
+            version: 1,
+            text: r#"[tasks.a]
+depends = ["missing"]
+
+[tasks.b]
+depends = ["c"]
+
+[tasks.c]
+depends = ["b"]
+"#
+            .into(),
+        };
+
+        let problems = diagnostics(&unresolved);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.code.as_deref() == Some("mise.unresolved-task"))
+        );
+        assert_eq!(
+            problems
+                .iter()
+                .filter(|problem| problem.code.as_deref() == Some("mise.dependency-cycle"))
+                .count(),
+            2
+        );
+
+        let invalid = ProviderDocument {
+            text: "[tasks.build\nrun = \"echo hi\"".into(),
+            ..unresolved
+        };
+        assert!(
+            diagnostics(&invalid)
+                .iter()
+                .any(|problem| problem.code.as_deref() == Some("mise.invalid-toml"))
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_mark_mise_definitions_and_references() {
+        let doc = provider_doc();
+        let tokens = semantic_tokens(&doc);
+
+        assert!(tokens.iter().any(|token| {
+            token.kind == TokenKind::Function
+                && token.modifiers.contains(&TokenModifier::Definition)
+        }));
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::Property));
+    }
+
+    #[test]
+    fn file_tasks_support_metadata_completion_navigation_and_run_gutter() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage"]);
+        host.set_project_root(Some("/project"));
+        state::save(&Snapshot {
+            project: "/project".into(),
+            context: "/project".into(),
+            tasks: vec![
+                MiseTask {
+                    name: "lint".into(),
+                    source: "/project/.mise/tasks/lint".into(),
+                    ..Default::default()
+                },
+                MiseTask {
+                    name: "group:build".into(),
+                    source: "/project/.mise/tasks/group/build.sh".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        let doc = ProviderDocument {
+            path: "/project/.mise/tasks/group/build.sh".into(),
+            language: "shellscript".into(),
+            version: 1,
+            text: "#!/bin/sh\n#MISE depends=[\"lint\"]\necho build\n".into(),
+        };
+
+        let metadata = completion(
+            &ProviderDocument {
+                text: "#!/bin/sh\n#MISE dep".into(),
+                ..doc.clone()
+            },
+            Position {
+                line: 1,
+                character: 9,
+            },
+            None,
+        );
+        assert!(metadata.iter().any(|item| item.label == "depends"));
+
+        let definitions = definition(
+            &doc,
+            Position {
+                line: 1,
+                character: 17,
+            },
+        );
+        assert_eq!(definitions[0].path, "/project/.mise/tasks/lint");
+
+        let feature_doc = FeatureDocument {
+            path: doc.path.clone(),
+            language: doc.language.clone(),
+            version: doc.version,
+            text: doc.text.clone(),
+        };
+        let actions = gutter_actions(&feature_doc);
+        assert_eq!(actions[0].argument.as_deref(), Some("group:build"));
+        assert_eq!(actions[0].line, 2);
+        assert!(
+            semantic_tokens(&doc)
+                .iter()
+                .any(|token| token.kind == TokenKind::Property)
+        );
+    }
+
+    #[test]
+    fn file_task_diagnostics_reject_unknown_metadata_and_self_dependencies() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage"]);
+        host.set_project_root(Some("/project"));
+        let doc = ProviderDocument {
+            path: "/project/mise-tasks/build".into(),
+            language: "shellscript".into(),
+            version: 1,
+            text: "#MISE mystery=true\n#MISE depends=[\"build\"]\necho build\n".into(),
+        };
+
+        let problems = diagnostics(&doc);
+
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.code.as_deref() == Some("mise.unknown-file-task-metadata"))
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.code.as_deref() == Some("mise.self-dependency"))
+        );
     }
 
     #[test]

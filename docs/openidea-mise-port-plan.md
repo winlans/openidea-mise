@@ -4,7 +4,7 @@
 
 本项目把 `intellij-mise` 的核心工作流移植到 OpenIDEA，而不是逐行翻译
 IntelliJ Platform 代码。移植基线为 `intellij-mise v6.4.0`，目标运行时为
-OpenIDEA `v0.1.40`、Plugin API `1.4`。
+OpenIDEA `v0.1.45`、Plugin API `1.8`。
 
 插件以独立社区插件发布：
 
@@ -20,7 +20,7 @@ OpenIDEA smoke test 都通过后才算完成。
 ## 阶段 0：工程与交付基础
 
 1. 初始化 Rust/WASI 插件、`plugin.toml`、设置 schema、开发脚本和测试框架。
-2. 固定 OpenIDEA SDK 到 `v0.1.40`，固定 Rust 到 `1.98.1`。
+2. 固定 OpenIDEA SDK 到 `v0.1.45`，固定 Rust 到 `1.98.1`。
 3. 建立 Mise 命令客户端、JSON 兼容解析、项目缓存、错误分类与日志脱敏。
 4. 建立 CI：
    - format、clippy、原生测试；
@@ -77,10 +77,16 @@ task/tool 有效来源；Tools 展示安装与激活状态；Environment 默认�
 - 任务定义与 `depends`、`depends_post`、`wait_for` 的跳转和 Rename；
 - 工具、任务、来源和当前版本 Hover；
 - 任务定义旁的 Run gutter；
-- `run` 和脚本字段的 Shell 注入。
+- `run` 和脚本字段的 Shell 注入；
+- Tasks、Tools、Environment 的 Structure View；
+- 无效 TOML、重复/缺失/自依赖/循环任务和被覆盖定义的实时诊断；
+- 任务、依赖、工具和环境键的语义高亮；
+- 默认 File Task 目录中的 `#MISE` 元数据补全、依赖导航、Hover、诊断、
+  语义高亮和 Run gutter。
 
 编辑路径不得执行慢速 CLI 命令，只能读取当前文档、项目索引和阶段 1 缓存。
-所有源码位置使用 UTF-16 行列，并容忍编辑中的不完整 TOML。
+所有源码位置使用 UTF-16 行列，并容忍编辑中的不完整 TOML。未保存文档变更只
+失效内存快照并触发编辑器 provider 重算，不在输入事件中运行 Mise CLI。
 
 ## 阶段 3：Mise Run Target
 
@@ -92,9 +98,10 @@ mise exec -- <original-program> <original-args>
 
 参数始终使用 argv 传递，不经过 shell 拼接。Run Target 仅在项目可信且
 `process:mise` 已授权时注册。该功能默认关闭，避免 OpenIDEA 将目标信息追加到
-所有任务名称；用户确实需要包装其他运行配置时可在插件设置中开启。
+所有任务名称；用户确实需要包装其他运行配置时可在插件设置中开启。启动前校验
+工作目录仍位于项目内，并以只读 Mise 命令检查配置是否可解析和已信任。
 
-OpenIDEA Plugin API 1.4 当前拒绝在 plugin-provided Run Target 上执行 Debug；
+OpenIDEA Plugin API 1.8 当前拒绝在 plugin-provided Run Target 上执行 Debug；
 Debug 必须选择 Local machine。这是宿主 API 边界，不由插件回退或绕过。
 
 ## 阶段 4：稳定化
@@ -102,6 +109,7 @@ Debug 必须选择 Local machine。这是宿主 API 边界，不由插件回退�
 - 任务依赖图、循环和缺失依赖提示；
 - 大项目缓存上限、取消、超时和跨平台路径；
 - Mise JSON 向前兼容 fixtures；
+- 使用 API 1.8 动态文件图标标记 Mise 配置、File Task 目录和源文件；
 - 用户文档、故障排查、密钥轮换和 marketplace runbook；
 - 发布前完整安装、升级与签名链验证。
 
@@ -134,7 +142,7 @@ Registry entry 固定为 `plugins/winlans.mise.toml`，首个版本同时注册
 
 ## 实施状态
 
-截至 2026-11-12：
+截至 2026-11-16：
 
 - 阶段 0：工程、版本一致性检查、CI、Release Please、签名打包和 registry PR
   自动化已实现；专用生产 publisher key 已生成并以 `0600` 权限备份在
@@ -147,17 +155,22 @@ Registry entry 固定为 `plugins/winlans.mise.toml`，首个版本同时注册
 - 工具窗口已迁移为包内静态 Web View（`web/index.html`）。页面通过
   `openidea.postMessage` / `openidea.onMessage` 与 Wasm 后端交换快照，
   使用 `header = "none"` 去除重复的宿主标题行，并把刷新操作放在页签栏。
-- 阶段 2：Mise TOML 补全、Hover、跳转、索引 Rename/Find Usages、Run gutter
-  和 Shell 注入已实现。多行 `depends`/`depends_post`/`wait_for`、对象依赖、
-  有效继承来源跳转与覆盖提示均有原生测试。
-- 阶段 3：可选 `mise.exec` Run Target 已实现；Run/Test 可用，Debug 明确受
-  OpenIDEA Plugin API 限制。
+- 阶段 2：Mise TOML 补全、Hover、跳转、索引 Rename/Find Usages、Run gutter、
+  Shell 注入、Structure View、实时诊断和语义高亮已实现。多行
+  `depends`/`depends_post`/`wait_for`、对象依赖、有效继承来源跳转与覆盖提示
+  均有原生测试。Mise File Tasks 支持默认五类任务目录、`#MISE` 元数据补全、
+  依赖跳转、诊断、语义高亮和 Run gutter。
+- 阶段 3：可选 `mise.exec` Run Target 已实现；Run/Test 可用，并在启动前校验
+  工作目录边界与 Mise 配置信任状态。Debug 明确受 OpenIDEA Plugin API 限制。
 - 阶段 4：依赖图、缺失依赖、循环检测、图节点运行、2 MiB 持久缓存上限、
   CLI 结果条数限制、上下文隔离、过期 WebView 响应丢弃、跨平台路径测试和
   当前/向前兼容 Mise JSON fixtures 已实现。
+- OpenIDEA SDK/CLI 已升级到 v0.1.45 / Plugin API 1.8。插件订阅未保存文档
+  变更，并使用 API 1.8 动态文件图标把官方 Mise 图标应用到配置、任务目录和
+  File Task 源文件。
 
 本地原生测试、format、Clippy、`wasm32-wasip2` release 构建、
-OpenIDEA v0.1.40 `openidea-plugin check` 和临时密钥签名包 smoke test
+OpenIDEA v0.1.45 `openidea-plugin check` 和临时密钥签名包 smoke test
 均已通过。真实签名包已验证包含 `SIGNATURE.json`，registry 更新脚本也已通过
 首次写入与幂等重跑测试；CI 同样覆盖该真实签名包到 registry 的完整路径。
 

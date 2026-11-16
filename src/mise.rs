@@ -31,6 +31,10 @@ pub fn trust(project: &Project, context: &str) -> Result<(), String> {
     run(project, context, &["--yes", "trust"]).map(|_| ())
 }
 
+pub fn validate_context(project: &Project, context: &str) -> Result<(), String> {
+    run(project, context, &["config", "ls", "--json"]).map(|_| ())
+}
+
 pub fn requires_trust(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("not trusted") || error.contains("untrusted-config")

@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-version="${OPENIDEA_CLI_VERSION:-0.1.40}"
+version="${OPENIDEA_CLI_VERSION:-0.1.45}"
 install_dir="${1:-.tools}"
 archive="openidea-plugin-linux-x86_64.gz"
 url="https://github.com/l0ng-ai/openidea/releases/download/v${version}/${archive}"
@@ -10,8 +10,8 @@ expected_sha256="${OPENIDEA_CLI_SHA256:-}"
 
 if [ -z "${expected_sha256}" ]; then
   case "${version}" in
-    0.1.40)
-      expected_sha256="24ee120405fabe75b7404fbe57d39091385fd5a06361103a22596d87212e8fa0"
+    0.1.45)
+      expected_sha256="00ad9c6062f60b36efbacf21eefd68a00135f2d4ebb0eded360c10670dc8df8c"
       ;;
     *)
       echo "No trusted SHA-256 is configured for OpenIDEA CLI v${version}." >&2

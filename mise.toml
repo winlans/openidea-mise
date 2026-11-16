@@ -6,12 +6,12 @@ rust = { version = "1.98.1", profile = "minimal", components = ["clippy", "rustf
 
 [env]
 CARGO_TERM_COLOR = "always"
-OPENIDEA_CLI_VERSION = "0.1.40"
+OPENIDEA_CLI_VERSION = "0.1.45"
 
 [tasks.setup]
-description = "Install the pinned OpenIDEA plugin CLI when it is missing"
+description = "Install the pinned OpenIDEA plugin CLI when it is missing or outdated"
 run = """
-if [ ! -x .tools/openidea-plugin ]; then
+if [ ! -x .tools/openidea-plugin ] || ! .tools/openidea-plugin --version 2>/dev/null | grep -q "$OPENIDEA_CLI_VERSION"; then
   scripts/install-openidea-plugin.sh
 fi
 """

@@ -8,7 +8,7 @@ license = "Apache-2.0"
 change-notes = "0.1.0 — first OpenIDEA port with tasks, tools, environment and run integration."
 categories = ["tools"]
 icon = "icons/mise.svg"
-engines.openidea = "^1.4"
+engines.openidea = "^1.8"
 wasm = "dist/plugin.wasm"
 activation = [
   "on-view:mise",
@@ -16,10 +16,11 @@ activation = [
   "on-event:file-saved",
   "on-event:files-changed",
   "on-event:settings-changed",
+  "on-event:document-changed",
 ]
 
 [capabilities]
-required = ["project.read", "storage", "events"]
+required = ["project.read", "editor.read", "storage", "events"]
 optional = ["process:mise"]
 
 [[contributes.commands]]
@@ -73,8 +74,28 @@ languages = ["toml"]
 kinds = ["gutter-actions", "injections"]
 languages = ["toml"]
 
+[[contributes.providers]]
+kinds = ["document-symbols", "diagnostics", "semantic-tokens"]
+languages = ["toml"]
+
+[[contributes.providers]]
+kinds = ["completion", "definition", "hover"]
+languages = ["shellscript"]
+
+[[contributes.providers]]
+kinds = ["gutter-actions", "diagnostics", "semantic-tokens"]
+languages = ["shellscript"]
+
 [[contributes.documentIndexers]]
-extensions = ["toml"]
+extensions = ["toml", "sh"]
+
+[[contributes.fileIcons]]
+id = "mise-config"
+icon = "icons/mise.svg"
+
+[[contributes.fileIcons]]
+id = "mise-task"
+icon = "icons/mise.svg"
 
 [contributes.settings]
 title = "Mise"

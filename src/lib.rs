@@ -8,7 +8,7 @@ use crate::model::{MiseTask, Snapshot, task_configuration_id};
 use openidea_plugin::views::{View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
     Error, Event, Invocation, NotificationLevel, Plugin, PluginRunConfiguration, PluginRunTarget,
-    RunConfigurations, host, register_plugin,
+    RunConfigurations, RunTargetLaunch, RunTargetValidation, host, register_plugin,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -88,6 +88,7 @@ impl OpenideaMise {
             Err(_) => {}
         }
         let _ = configure_run_target(&project);
+        let _ = configure_file_icons(&project, &snapshot);
         snapshot
     }
 
@@ -143,6 +144,11 @@ impl OpenideaMise {
             && !matches!(error, Error::Denied(_))
         {
             snapshot.errors.push(format!("Run target: {error}"));
+        }
+        if let Err(error) = configure_file_icons(project, &snapshot)
+            && !matches!(error, Error::Denied(_))
+        {
+            snapshot.errors.push(format!("File icons: {error}"));
         }
         self.snapshots
             .insert(snapshot_key(root, context), snapshot.clone());
@@ -267,12 +273,30 @@ impl OpenideaMise {
     }
 
     fn invalidate(&mut self, ctx: &Invocation) {
+        self.invalidate_memory(ctx);
+        let Ok((_, root)) = Self::root(ctx) else {
+            return;
+        };
+        state::delete(&root);
+    }
+
+    fn invalidate_memory(&mut self, ctx: &Invocation) {
         let Ok((_, root)) = Self::root(ctx) else {
             return;
         };
         let prefix = format!("{}\0", normalize_path(&root));
         self.snapshots.retain(|key, _| !key.starts_with(&prefix));
-        state::delete(&root);
+    }
+
+    fn post_invalidation(&self, ctx: &Invocation, refresh: bool) {
+        let Ok((_, root)) = Self::root(ctx) else {
+            return;
+        };
+        let _ = post_message(
+            json!({"op":"invalidate","project":root,"refresh":refresh}),
+            None,
+            None,
+        );
     }
 }
 
@@ -287,9 +311,15 @@ impl Plugin for OpenideaMise {
             "**/.config/mise/**/*.toml",
             "**/.miserc*.toml",
             "**/.tool-versions",
+            "**/mise-tasks/**",
+            "**/.mise-tasks/**",
+            "**/mise/tasks/**",
+            "**/.mise/tasks/**",
+            "**/.config/mise/tasks/**",
         ];
         host::subscribe_paths("file-saved", &globs)?;
         host::subscribe_paths("files-changed", &globs)?;
+        host::subscribe_paths("document-changed", &globs)?;
         Ok(())
     }
 
@@ -323,7 +353,11 @@ impl Plugin for OpenideaMise {
     fn handle_events(&mut self, events: &[Event], ctx: &Invocation) {
         for event in events {
             match event {
-                Event::FileSaved(path) if is_hierarchy_path(path) => self.invalidate(ctx),
+                Event::FileSaved(path) if is_hierarchy_path(path) => {
+                    self.invalidate(ctx);
+                    self.refresh_icons(ctx);
+                    self.post_invalidation(ctx, true);
+                }
                 Event::FilesChanged(changes)
                     if changes
                         .created
@@ -333,6 +367,12 @@ impl Plugin for OpenideaMise {
                         .any(|path| is_hierarchy_path(path)) =>
                 {
                     self.invalidate(ctx);
+                    self.refresh_icons(ctx);
+                    self.post_invalidation(ctx, true);
+                }
+                Event::DocumentChanged(change) if is_hierarchy_path(&change.path) => {
+                    self.invalidate_memory(ctx);
+                    self.post_invalidation(ctx, false);
                 }
                 Event::Other { kind, .. } if kind == "settings-changed" => {
                     if let Ok((project, _)) = Self::root(ctx) {
@@ -342,6 +382,16 @@ impl Plugin for OpenideaMise {
                 _ => {}
             }
         }
+    }
+}
+
+impl OpenideaMise {
+    fn refresh_icons(&mut self, ctx: &Invocation) {
+        let Ok((project, root)) = Self::root(ctx) else {
+            return;
+        };
+        let snapshot = self.snapshot(&root, &root);
+        let _ = configure_file_icons(&project, &snapshot);
     }
 }
 
@@ -435,6 +485,38 @@ impl RunConfigurations for OpenideaMise {
     }
 }
 
+impl RunTargetValidation for OpenideaMise {
+    fn validate(
+        &mut self,
+        project: &str,
+        target_id: &str,
+        launch: &RunTargetLaunch,
+    ) -> Result<(), String> {
+        if target_id != "mise.exec" {
+            return Ok(());
+        }
+        let Some(project_handle) = host::project_of(project) else {
+            return Err("The OpenIDEA project is no longer open.".into());
+        };
+        let root = project_handle
+            .root()
+            .map_err(|error| format!("Could not read the project root: {error}"))?;
+        if !path_is_within(&launch.cwd, &root) {
+            return Err(format!(
+                "Mise can only run inside this project. `{}` is outside `{root}`.",
+                launch.cwd
+            ));
+        }
+        mise::validate_context(&project_handle, &launch.cwd).map_err(|error| {
+            if mise::requires_trust(&error) {
+                "The Mise configuration for this working directory is not trusted. Open the Mise tool window and choose Trust before running.".into()
+            } else {
+                format!("Mise could not validate this working directory: {error}")
+            }
+        })
+    }
+}
+
 fn run_configuration(project_root: &str, task: &MiseTask) -> PluginRunConfiguration {
     PluginRunConfiguration {
         id: task_configuration_id(&task.name),
@@ -480,6 +562,12 @@ fn same_path(left: &str, right: &str) -> bool {
     comparable_path(left) == comparable_path(right)
 }
 
+fn path_is_within(path: &str, root: &str) -> bool {
+    let path = comparable_path(path);
+    let root = comparable_path(root);
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
 fn comparable_path(path: &str) -> String {
     let normalized = normalize_path(path);
     if normalized.as_bytes().get(1) == Some(&b':') || normalized.starts_with("//") {
@@ -506,6 +594,106 @@ fn configure_run_target(project: &openidea_plugin::Project) -> Result<(), Error>
             commands: Vec::new(),
         },
     )
+}
+
+const FILE_TASK_DIRECTORIES: [&str; 5] = [
+    "mise-tasks",
+    ".mise-tasks",
+    "mise/tasks",
+    ".mise/tasks",
+    ".config/mise/tasks",
+];
+
+fn configure_file_icons(
+    project: &openidea_plugin::Project,
+    snapshot: &Snapshot,
+) -> Result<(), Error> {
+    let root = project.root()?;
+    let mut configs: BTreeMap<String, String> = BTreeMap::new();
+    for config in &snapshot.configs {
+        if !config.path.is_empty() && path_is_within(&config.path, &root) {
+            configs.insert(config.path.clone(), "mise-config".into());
+        }
+    }
+    let mut tasks: BTreeMap<String, String> = BTreeMap::new();
+    for path in project.find_files("**/*", 10_000).unwrap_or_default() {
+        if is_config_path(&path) || is_mise_marker_path(&path) {
+            configs.insert(path.clone(), "mise-config".into());
+        }
+        if is_file_task_path(&path) {
+            if let Some(directory_path) = file_task_directory(&path) {
+                tasks.insert(directory_path, "mise-task".into());
+            }
+            tasks.insert(path, "mise-task".into());
+        }
+    }
+    for directory in FILE_TASK_DIRECTORIES {
+        let path = format!("{}/{}", root.trim_end_matches(['/', '\\']), directory);
+        if project.exists(&path).unwrap_or(false) {
+            tasks.insert(path, "mise-task".into());
+        }
+    }
+    for task in &snapshot.tasks {
+        if !task.source.is_empty()
+            && path_is_within(&task.source, &root)
+            && !is_config_path(&task.source)
+            && !is_mise_marker_path(&task.source)
+            && project.exists(&task.source).unwrap_or(false)
+        {
+            tasks.insert(task.source.clone(), "mise-task".into());
+            if let Some(directory) = file_task_directory(&task.source) {
+                tasks.insert(directory, "mise-task".into());
+            }
+        }
+    }
+
+    host::set_file_icons(
+        "mise-config-files",
+        &configs.into_iter().take(10_000).collect::<Vec<_>>(),
+    )?;
+    host::set_file_icons(
+        "mise-file-tasks",
+        &tasks.into_iter().take(10_000).collect::<Vec<_>>(),
+    )
+}
+
+fn file_task_directory(path: &str) -> Option<String> {
+    let normalized = normalize_path(path);
+    let comparable = comparable_path(&normalized);
+    let mut best: Option<(usize, usize)> = None;
+    for directory in FILE_TASK_DIRECTORIES {
+        let marker = format!("/{directory}/");
+        if let Some(index) = comparable.rfind(&marker) {
+            let end = index + marker.len() - 1;
+            if best.is_none_or(|(best_index, _)| index > best_index) {
+                best = Some((index, end));
+            }
+        }
+    }
+    best.map(|(_, end)| normalized[..end].to_owned())
+}
+
+pub(crate) fn is_file_task_path(path: &str) -> bool {
+    file_task_directory(path).is_some()
+}
+
+pub(crate) fn file_task_name(path: &str) -> Option<String> {
+    let normalized = normalize_path(path);
+    let directory = file_task_directory(&normalized)?;
+    let relative = normalized
+        .strip_prefix(&format!("{directory}/"))?
+        .trim_matches('/');
+    if relative.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<_> = relative.split('/').map(str::to_owned).collect();
+    if let Some(file_name) = parts.last_mut()
+        && let Some((stem, _)) = file_name.rsplit_once('.')
+        && !stem.is_empty()
+    {
+        *file_name = stem.to_owned();
+    }
+    Some(parts.join(":"))
 }
 
 fn snapshot_message(
@@ -621,9 +809,10 @@ fn is_config_path(path: &str) -> bool {
 }
 
 fn is_hierarchy_path(path: &str) -> bool {
-    if is_config_path(path) {
-        return true;
-    }
+    is_config_path(path) || is_file_task_path(path) || is_mise_marker_path(path)
+}
+
+fn is_mise_marker_path(path: &str) -> bool {
     matches!(
         normalize_path(path)
             .to_ascii_lowercase()
@@ -642,11 +831,14 @@ register_plugin!(
     OpenideaMise,
     views,
     run_configurations,
+    run_target_validation,
     providers,
     hover,
     language_features,
     injections,
     indexing,
+    diagnostics,
+    semantic_tokens,
 );
 
 #[cfg(test)]
@@ -734,6 +926,194 @@ mod tests {
         host.set_setting("registerRunTarget", "false");
         configure_run_target(&project).unwrap();
         assert!(host.run_targets().is_empty());
+    }
+
+    #[test]
+    fn mise_run_target_validation_checks_project_scope_and_trust() {
+        let host = host_with_mise();
+        host.on_process("mise", |args, _| match args {
+            [flag, context, a, b, c]
+                if flag == "-C"
+                    && context == "/project/backend"
+                    && a == "config"
+                    && b == "ls"
+                    && c == "--json" =>
+            {
+                Ok(ProcessOutput {
+                    status: Some(0),
+                    stdout: "[]".into(),
+                    stderr: String::new(),
+                })
+            }
+            _ => Err(Error::Invalid(format!("unexpected mise args: {args:?}"))),
+        });
+        let mut plugin = OpenideaMise::default();
+        let launch = RunTargetLaunch {
+            operation: openidea_plugin::RunTargetOperation::Run,
+            program: "npm".into(),
+            cwd: "/project/backend".into(),
+        };
+
+        assert!(
+            host.validate_run_target(&mut plugin, "mise.exec", &launch)
+                .is_ok()
+        );
+        assert_eq!(
+            host.process_runs().last().unwrap().args,
+            ["-C", "/project/backend", "config", "ls", "--json"]
+        );
+
+        let outside = RunTargetLaunch {
+            cwd: "/other/project".into(),
+            ..launch.clone()
+        };
+        assert!(
+            host.validate_run_target(&mut plugin, "mise.exec", &outside)
+                .unwrap_err()
+                .contains("outside")
+        );
+
+        host.on_process("mise", |_, _| {
+            Ok(ProcessOutput {
+                status: Some(1),
+                stdout: String::new(),
+                stderr: "Config files in /project/mise.toml are not trusted.".into(),
+            })
+        });
+        assert!(
+            host.validate_run_target(&mut plugin, "mise.exec", &launch)
+                .unwrap_err()
+                .contains("not trusted")
+        );
+    }
+
+    #[test]
+    fn dynamic_icons_cover_configs_task_directories_and_file_tasks() {
+        let host = MockHost::install().with_capabilities(&["project.read"]);
+        host.set_project_root(Some("/project"));
+        host.add_file("mise.toml", "[tools]\nnode = \"22\"\n");
+        host.add_file(".mise/tasks/build", "#!/bin/sh\n");
+        let project = host.invocation().project().unwrap();
+        let snapshot = Snapshot {
+            project: "/project".into(),
+            context: "/project".into(),
+            configs: vec![crate::model::MiseConfigFile {
+                path: "/home/user/.config/mise/config.toml".into(),
+                ..Default::default()
+            }],
+            tasks: vec![
+                MiseTask {
+                    name: "build".into(),
+                    source: "/project/.mise/tasks/build".into(),
+                    ..Default::default()
+                },
+                MiseTask {
+                    name: "configured".into(),
+                    source: "/project/mise.toml".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        configure_file_icons(&project, &snapshot).unwrap();
+
+        let icons = host.file_icons();
+        assert_eq!(
+            icons
+                .get(&("mise-config-files".into(), "/project/mise.toml".into()))
+                .map(|value| value.0.as_str()),
+            Some("mise-config")
+        );
+        assert_eq!(
+            icons
+                .get(&(
+                    "mise-file-tasks".into(),
+                    "/project/.mise/tasks/build".into()
+                ))
+                .map(|value| value.0.as_str()),
+            Some("mise-task")
+        );
+        assert!(
+            !icons
+                .keys()
+                .any(|(_, path)| path == "/home/user/.config/mise/config.toml")
+        );
+        assert!(!icons.contains_key(&("mise-file-tasks".into(), "/project/mise.toml".into())));
+        assert_eq!(
+            file_task_name("/project/.mise/tasks/group/build.sh").as_deref(),
+            Some("group:build")
+        );
+    }
+
+    #[test]
+    fn activation_subscribes_to_unsaved_mise_configuration_and_file_tasks() {
+        let host = MockHost::install().with_capabilities(&[
+            "project.read",
+            "editor.read",
+            "storage",
+            "events",
+        ]);
+        let mut plugin = OpenideaMise::default();
+
+        plugin
+            .activate(&openidea_plugin::Context::default())
+            .unwrap();
+
+        let subscriptions = host.path_subscriptions();
+        assert!(
+            subscriptions["document-changed"]
+                .iter()
+                .any(|glob| glob == "**/.mise/tasks/**")
+        );
+        assert!(
+            subscriptions["document-changed"]
+                .iter()
+                .any(|glob| glob == "**/mise*.toml")
+        );
+    }
+
+    #[test]
+    fn unsaved_document_changes_invalidate_without_running_mise() {
+        let host = MockHost::install().with_capabilities(&[
+            "project.read",
+            "editor.read",
+            "storage",
+            "events",
+            "process:mise",
+        ]);
+        host.set_project_root(Some("/project"));
+        state::save(&Snapshot {
+            project: "/project".into(),
+            context: "/project".into(),
+            tasks: vec![MiseTask {
+                name: "build".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let mut plugin = OpenideaMise::default();
+        assert_eq!(
+            plugin.snapshot("/project", "/project").tasks[0].name,
+            "build"
+        );
+
+        plugin.handle_events(
+            &[Event::DocumentChanged(openidea_plugin::DocumentChanged {
+                path: "/project/mise.toml".into(),
+                base_version: 1,
+                version: 2,
+                changes: Vec::new(),
+            })],
+            &host.invocation(),
+        );
+
+        assert!(host.process_runs().is_empty());
+        let message: Value = serde_json::from_str(&host.view_messages().last().unwrap().1).unwrap();
+        assert_eq!(message["op"], "invalidate");
+        assert_eq!(message["project"], "/project");
+        assert_eq!(message["refresh"], false);
     }
 
     #[test]
@@ -951,6 +1331,7 @@ mod tests {
         assert!(PAGE.contains("::-webkit-scrollbar-track"));
         assert!(PAGE.contains("scrollbar-color: var(--openidea-border) transparent"));
         assert!(PAGE.contains(r#"requestSnapshot("trust", true)"#));
+        assert!(PAGE.contains("Mise configuration has unsaved changes"));
         assert!(PAGE.contains("Cancel"));
         assert!(PAGE.contains(r#"id="refresh""#));
         assert!(!PAGE.contains("<strong>Mise</strong>"));
