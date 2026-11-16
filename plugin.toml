@@ -67,7 +67,7 @@ files = [
 ]
 
 [[contributes.providers]]
-kinds = ["completion", "definition", "hover"]
+kinds = ["completion", "code-actions", "definition", "hover"]
 languages = ["toml"]
 
 [[contributes.providers]]

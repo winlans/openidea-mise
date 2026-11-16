@@ -21,7 +21,9 @@ The port is implemented against OpenIDEA Plugin API 1.8 and runs as a sandboxed
 - Visualize task dependencies, post-dependencies, wait-for edges, missing tasks,
   and cycles.
 - Complete and navigate task names in Mise TOML files, with task hover,
-  Rename/Find Usages indexing, Run gutter actions, and Shell script injection.
+  Rename/Find Usages indexing, Run gutter actions, Shell script injection, and
+  a quick fix that converts TOML 1.1 multiline task environments to dotted
+  keys understood by TOML 1.0-only language servers.
 - Show Mise-aware Structure entries, live diagnostics, and semantic highlighting
   while editing unsaved TOML documents.
 - Recognize Mise File Tasks under `mise-tasks`, `.mise-tasks`, `mise/tasks`,
@@ -120,6 +122,10 @@ before invoking these tasks.
   **Run on** selector.
 - A selected plugin Run Target cannot be used for Debug in the current
   OpenIDEA Plugin API. Use Local machine for Debug.
+- Mise accepts TOML 1.1 multiline inline tables, but Taplo/Better TOML may
+  still diagnose them with messages such as `expected new line`. Use
+  **Alt+Enter → Mise: Convert multiline env to TOML 1.0-compatible keys**;
+  task `env` completion also emits the compatible dotted-key form.
 
 See [the port plan](docs/openidea-mise-port-plan.md) for the staged feature and
 release roadmap. See [the release runbook](docs/releasing.md) for signing-key,

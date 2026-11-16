@@ -8,10 +8,10 @@ use openidea_plugin::language_features::{
     LanguageFeatures,
 };
 use openidea_plugin::providers::{
-    CompletionItem, CompletionKind, Document as ProviderDocument, Providers,
+    CodeAction, CompletionItem, CompletionKind, Document as ProviderDocument, Providers,
 };
 use openidea_plugin::semantic_tokens::{SemanticToken, SemanticTokens, TokenKind, TokenModifier};
-use openidea_plugin::{Diagnostic, Location, Position, Range, Severity, host, text};
+use openidea_plugin::{Diagnostic, Location, Position, Range, Severity, TextEdit, host, text};
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
@@ -99,7 +99,9 @@ pub fn completion(
 
     match section.as_deref() {
         Some("tools") => tool_name_completions(&doc.path, &doc.text, at),
-        Some(section) if section.starts_with("tasks.") => task_field_completions(&doc.text, at),
+        Some(section) if is_direct_task_section(section) => {
+            task_field_completions(&doc.text, at, section)
+        }
         _ => top_level_completions(&doc.text, at),
     }
 }
@@ -342,6 +344,10 @@ impl Providers for crate::OpenideaMise {
 
     fn definition(&mut self, doc: &ProviderDocument, at: Position) -> Vec<Location> {
         definition(doc, at)
+    }
+
+    fn code_actions(&mut self, doc: &ProviderDocument, selection: Range) -> Vec<CodeAction> {
+        code_actions(doc, selection)
     }
 }
 
@@ -1397,8 +1403,8 @@ fn tool_name_completions(path: &str, source: &str, at: Position) -> Vec<Completi
         .collect()
 }
 
-fn task_field_completions(source: &str, at: Position) -> Vec<CompletionItem> {
-    const FIELDS: [(&str, &str, bool); 18] = [
+fn task_field_completions(source: &str, at: Position, task_section: &str) -> Vec<CompletionItem> {
+    const FIELDS: [(&str, &str, bool); 17] = [
         ("description", "description = \"$0\"", true),
         ("run", "run = \"$0\"", true),
         ("script", "script = \"$0\"", true),
@@ -1416,10 +1422,9 @@ fn task_field_completions(source: &str, at: Position) -> Vec<CompletionItem> {
         ("raw", "raw = ${1:false}", true),
         ("confirm", "confirm = \"$0\"", true),
         ("alias", "alias = \"$0\"", true),
-        ("env", "[tasks.${1:name}.env]\n$0", true),
     ];
     let replace = word_range(source, at);
-    FIELDS
+    let mut items: Vec<_> = FIELDS
         .into_iter()
         .map(|(label, insert, snippet)| {
             let mut item = CompletionItem::new(label, CompletionKind::Property);
@@ -1428,7 +1433,113 @@ fn task_field_completions(source: &str, at: Position) -> Vec<CompletionItem> {
             item.replace = replace;
             item
         })
+        .collect();
+    let mut environment = CompletionItem::new("env", CompletionKind::Property);
+    environment.detail = Some("Task environment (TOML 1.0 compatible)".into());
+    environment.insert_text = "env.${1:NAME} = \"$0\"".into();
+    environment.snippet = true;
+    environment.replace = replace;
+    environment.documentation = Some(format!(
+        "Adds an environment variable to `[{task_section}]` using a dotted key. This avoids false syntax errors from TOML language servers that do not yet accept TOML 1.1 multiline inline tables."
+    ));
+    items.push(environment);
+    items
+}
+
+fn is_direct_task_section(section: &str) -> bool {
+    toml_edit::Key::parse(section)
+        .is_ok_and(|keys| keys.len() == 2 && keys.first().is_some_and(|key| key.get() == "tasks"))
+}
+
+fn code_actions(doc: &ProviderDocument, selection: Range) -> Vec<CodeAction> {
+    if !is_mise_config_document(&doc.path) {
+        return Vec::new();
+    }
+
+    multiline_task_env_edits(&doc.text)
+        .into_iter()
+        .filter(|edit| ranges_touch(edit.range, selection))
+        .map(|edit| CodeAction {
+            title: "Mise: Convert multiline env to TOML 1.0-compatible keys".into(),
+            kind: Some("quickfix".into()),
+            preferred: true,
+            edits: vec![(doc.path.clone(), vec![edit])],
+            data: None,
+        })
         .collect()
+}
+
+fn multiline_task_env_edits(source: &str) -> Vec<TextEdit> {
+    let mut edits = Vec::new();
+    let mut section = None;
+    let mut offset = 0usize;
+
+    for raw_line in source.split_inclusive('\n') {
+        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let leading = line.len() - line.trim_start().len();
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[')
+            && !trimmed.starts_with("[[")
+            && let Some(close) = trimmed.find(']')
+        {
+            section = Some(trimmed[1..close].trim().to_owned());
+            offset += raw_line.len();
+            continue;
+        }
+        if !section.as_deref().is_some_and(is_direct_task_section) {
+            offset += raw_line.len();
+            continue;
+        }
+        let Some(equal) = assignment_equal(trimmed) else {
+            offset += raw_line.len();
+            continue;
+        };
+        if unquoted_key(trimmed[..equal].trim()) != "env" {
+            offset += raw_line.len();
+            continue;
+        }
+        let value_absolute = offset + leading + equal + 1;
+        let (value_start, value_end) = assignment_value_range(source, value_absolute);
+        let value_text = &source[value_start..value_end];
+        if !value_text.starts_with('{') || !value_text.contains('\n') || value_text.contains('#') {
+            offset += raw_line.len();
+            continue;
+        }
+        let Ok(value) = toml_edit::Value::from_str(value_text) else {
+            offset += raw_line.len();
+            continue;
+        };
+        let Some(table) = value.as_inline_table() else {
+            offset += raw_line.len();
+            continue;
+        };
+        let mut assignments = Vec::new();
+        for (key, value) in table.iter() {
+            let key = table
+                .key(key)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| toml_edit::Key::new(key).to_string());
+            let mut value = value.clone();
+            value.decor_mut().clear();
+            assignments.push(format!("env.{key} = {value}"));
+        }
+        if assignments.is_empty() {
+            offset += raw_line.len();
+            continue;
+        }
+        let key_start = offset + leading;
+        edits.push(TextEdit {
+            range: byte_range(source, key_start, value_end),
+            text: assignments.join("\n"),
+        });
+        offset += raw_line.len();
+    }
+    edits
+}
+
+fn ranges_touch(left: Range, right: Range) -> bool {
+    left.start <= right.end && right.start <= left.end
 }
 
 fn top_level_completions(source: &str, at: Position) -> Vec<CompletionItem> {
@@ -1768,6 +1879,100 @@ depends = [
         );
 
         assert!(items.iter().any(|item| item.label == "lint"));
+    }
+
+    #[test]
+    fn task_environment_completion_uses_toml_1_0_compatible_dotted_keys() {
+        let doc = ProviderDocument {
+            path: "/project/mise.toml".into(),
+            language: "toml".into(),
+            version: 1,
+            text: "[tasks.\"build:web\"]\nen".into(),
+        };
+        let items = completion(
+            &doc,
+            Position {
+                line: 1,
+                character: 2,
+            },
+            None,
+        );
+        let environment = items.iter().find(|item| item.label == "env").unwrap();
+        assert_eq!(environment.insert_text, "env.${1:NAME} = \"$0\"");
+        assert!(
+            environment
+                .documentation
+                .as_deref()
+                .unwrap()
+                .contains("[tasks.\"build:web\"]")
+        );
+
+        let nested = ProviderDocument {
+            text: "[tasks.dev.env]\nVI".into(),
+            ..doc
+        };
+        assert!(
+            completion(
+                &nested,
+                Position {
+                    line: 1,
+                    character: 2,
+                },
+                None,
+            )
+            .iter()
+            .all(|item| item.label != "run")
+        );
+    }
+
+    #[test]
+    fn accepts_mise_toml_1_1_task_env_and_offers_a_taplo_compatible_fix() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage"]);
+        host.set_project_root(Some("/project"));
+        let source = r#"[tasks.dev]
+run = 'npm run dev'
+env = {
+  VITE_APP_USER_SITE_URL = 'http://localhost:5173',
+  VITE_APP_TURNSTILE_ENABLED = 'false',
+  VITE_APP_TURNSTILE_SITE_KEY = '',
+}
+"#;
+        let doc = ProviderDocument {
+            path: "/project/mise.toml".into(),
+            language: "toml".into(),
+            version: 1,
+            text: source.into(),
+        };
+        assert!(
+            diagnostics(&doc)
+                .iter()
+                .all(|diagnostic| diagnostic.code.as_deref() != Some("mise.invalid-toml"))
+        );
+
+        let actions = code_actions(&doc, Range::new(Position::new(4, 42), Position::new(4, 43)));
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind.as_deref(), Some("quickfix"));
+        let edit = &actions[0].edits[0].1[0];
+        assert_eq!(
+            edit.text,
+            concat!(
+                "env.VITE_APP_USER_SITE_URL = 'http://localhost:5173'\n",
+                "env.VITE_APP_TURNSTILE_ENABLED = 'false'\n",
+                "env.VITE_APP_TURNSTILE_SITE_KEY = ''"
+            )
+        );
+        let start = text::offset(source, edit.range.start).unwrap();
+        let end = text::offset(source, edit.range.end).unwrap();
+        let fixed = format!("{}{}{}", &source[..start], edit.text, &source[end..]);
+        let parsed = toml_edit::DocumentMut::from_str(&fixed).unwrap();
+        assert_eq!(
+            parsed["tasks"]["dev"]["env"]["VITE_APP_USER_SITE_URL"].as_str(),
+            Some("http://localhost:5173")
+        );
+        assert_eq!(
+            parsed["tasks"]["dev"]["env"]["VITE_APP_TURNSTILE_ENABLED"].as_str(),
+            Some("false")
+        );
     }
 
     #[test]

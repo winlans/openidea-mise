@@ -79,6 +79,8 @@ Tools 按有效配置来源分组，明确区分嵌套项目、当前项目、�
 - Mise 配置键、工具名、任务名和依赖任务补全；
 - 任务定义与 `depends`、`depends_post`、`wait_for` 的跳转和 Rename；
 - 工具、任务、来源和当前版本 Hover；
+- 对 Mise 支持但 TOML 1.0 language server 误报的 TOML 1.1 多行任务 `env`
+  inline table 提供兼容转换 Quick Fix，并让 `env` 补全默认生成 dotted keys；
 - 任务定义旁的 Run gutter；
 - `run` 和脚本字段的 Shell 注入；
 - Tasks、Tools、Environment 的 Structure View；

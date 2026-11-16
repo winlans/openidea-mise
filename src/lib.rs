@@ -1342,6 +1342,9 @@ mod tests {
         assert!(!PAGE.contains("<strong>Mise</strong>"));
         assert!(MANIFEST.contains(r#"web = "web/index.html""#));
         assert!(MANIFEST.contains(r#"header = "none""#));
+        assert!(
+            MANIFEST.contains(r#"kinds = ["completion", "code-actions", "definition", "hover"]"#)
+        );
         assert!(ICON.contains(r##"fill="#CACCD2""##));
         assert!(ICON.contains(r##"stroke="#CACCD2""##));
         assert!(!ICON.contains("data-themed"));
