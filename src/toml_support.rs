@@ -66,7 +66,7 @@ pub fn completion(
     if is_mise_file_task(doc) {
         return file_task_completion(doc, at);
     }
-    if !is_mise_config_document(&doc.path) {
+    if !is_mise_config_provider_document(doc) {
         return Vec::new();
     }
     let parsed = parse_config(&doc.text);
@@ -110,7 +110,7 @@ pub fn definition(doc: &ProviderDocument, at: Position) -> Vec<Location> {
     if is_mise_file_task(doc) {
         return file_task_definition(doc, at);
     }
-    if !is_mise_config_document(&doc.path) {
+    if !is_mise_config_provider_document(doc) {
         return Vec::new();
     }
     let parsed = parse_config(&doc.text);
@@ -167,7 +167,7 @@ pub fn hover(doc: &ProviderDocument, at: Position) -> Option<Hover> {
     if is_mise_file_task(doc) {
         return file_task_hover(doc, at);
     }
-    if !is_mise_config_document(&doc.path) {
+    if !is_mise_config_provider_document(doc) {
         return None;
     }
     let parsed = parse_config(&doc.text);
@@ -265,7 +265,7 @@ pub fn gutter_actions(doc: &FeatureDocument) -> Vec<GutterAction> {
             argument: Some(name),
         }];
     }
-    if !is_mise_config_document(&doc.path) {
+    if !is_mise_config_provider_document(doc) {
         return Vec::new();
     }
     parse_config(&doc.text)
@@ -282,7 +282,7 @@ pub fn gutter_actions(doc: &FeatureDocument) -> Vec<GutterAction> {
 }
 
 pub fn injections(doc: &FeatureDocument) -> Vec<Injection> {
-    if !is_mise_config_document(&doc.path) {
+    if !is_mise_config_provider_document(doc) {
         return Vec::new();
     }
     parse_config(&doc.text)
@@ -392,7 +392,7 @@ impl SemanticTokens for crate::OpenideaMise {
 }
 
 fn document_symbols(doc: &FeatureDocument) -> Vec<DocumentSymbol> {
-    if !is_mise_config_document(&doc.path) {
+    if !is_mise_config_provider_document(doc) {
         return Vec::new();
     }
     let parsed = parse_config(&doc.text);
@@ -475,7 +475,7 @@ fn diagnostics(doc: &ProviderDocument) -> Vec<Diagnostic> {
     if is_mise_file_task(doc) {
         return file_task_diagnostics(doc);
     }
-    if !is_mise_config_document(&doc.path) {
+    if !is_mise_config_provider_document(doc) {
         return Vec::new();
     }
 
@@ -578,7 +578,7 @@ fn semantic_tokens(doc: &ProviderDocument) -> Vec<SemanticToken> {
     if is_mise_file_task(doc) {
         return file_task_semantic_tokens(doc);
     }
-    if !is_mise_config_document(&doc.path) {
+    if !is_mise_config_provider_document(doc) {
         return Vec::new();
     }
     let parsed = parse_config(&doc.text);
@@ -915,6 +915,7 @@ fn file_task_gutter_line(source: &str) -> u32 {
 
 fn is_mise_file_task(doc: &ProviderDocument) -> bool {
     doc.language == "shellscript"
+        && !is_mise_config_document(&doc.path)
         && (is_mise_file_task_path(&doc.path)
             || cached_snapshot(&doc.path)
                 .tasks
@@ -1452,7 +1453,7 @@ fn is_direct_task_section(section: &str) -> bool {
 }
 
 fn code_actions(doc: &ProviderDocument, selection: Range) -> Vec<CodeAction> {
-    if !is_mise_config_document(&doc.path) {
+    if !is_mise_config_provider_document(doc) {
         return Vec::new();
     }
 
@@ -1690,6 +1691,10 @@ fn unquoted_key(value: &str) -> String {
 
 fn is_mise_config_document(path: &str) -> bool {
     is_config_path(path)
+}
+
+fn is_mise_config_provider_document(doc: &ProviderDocument) -> bool {
+    doc.language == "toml" && is_mise_config_document(&doc.path)
 }
 
 fn task_key(name: &str) -> String {
@@ -1973,6 +1978,31 @@ env = {
             parsed["tasks"]["dev"]["env"]["VITE_APP_TURNSTILE_ENABLED"].as_str(),
             Some("false")
         );
+    }
+
+    #[test]
+    fn shell_injection_virtual_documents_are_not_reparsed_as_mise_toml() {
+        let injected = ProviderDocument {
+            path: "/project/mise.toml".into(),
+            language: "shellscript".into(),
+            version: 1,
+            text: format!(
+                "{}                 ./gradlew --console=plain bootRun\n",
+                "\n".repeat(15)
+            ),
+        };
+
+        assert!(diagnostics(&injected).is_empty());
+        assert!(semantic_tokens(&injected).is_empty());
+        assert!(
+            completion(&injected, Position::new(15, 25), None).is_empty(),
+            "the masked Shell document must not receive TOML completion"
+        );
+        assert!(hover(&injected, Position::new(15, 25)).is_none());
+        assert!(code_actions(&injected, Range::default()).is_empty());
+        assert!(document_symbols(&injected).is_empty());
+        assert!(gutter_actions(&injected).is_empty());
+        assert!(injections(&injected).is_empty());
     }
 
     #[test]

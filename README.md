@@ -126,6 +126,9 @@ before invoking these tasks.
   still diagnose them with messages such as `expected new line`. Use
   **Alt+Enter → Mise: Convert multiline env to TOML 1.0-compatible keys**;
   task `env` completion also emits the compatible dotted-key form.
+- Shell language injection for task `run`/`script` values is isolated from
+  Mise's TOML providers, so injected commands are never parsed again as a
+  complete TOML document.
 
 See [the port plan](docs/openidea-mise-port-plan.md) for the staged feature and
 release roadmap. See [the release runbook](docs/releasing.md) for signing-key,

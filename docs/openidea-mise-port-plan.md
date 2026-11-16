@@ -164,8 +164,9 @@ Registry entry 固定为 `plugins/winlans.mise.toml`，首个版本同时注册
 - 阶段 2：Mise TOML 补全、Hover、跳转、索引 Rename/Find Usages、Run gutter、
   Shell 注入、Structure View、实时诊断和语义高亮已实现。多行
   `depends`/`depends_post`/`wait_for`、对象依赖、有效继承来源跳转与覆盖提示
-  均有原生测试。Mise File Tasks 支持默认五类任务目录、`#MISE` 元数据补全、
-  依赖跳转、诊断、语义高亮和 Run gutter。
+  均有原生测试；Shell 虚拟注入文档按 language id 与宿主 TOML provider 隔离，
+  不会把注入命令再次解析成完整 TOML。Mise File Tasks 支持默认五类任务目录、
+  `#MISE` 元数据补全、依赖跳转、诊断、语义高亮和 Run gutter。
 - 阶段 3：可选 `mise.exec` Run Target 已实现；Run/Test 可用，并在启动前校验
   工作目录边界与 Mise 配置信任状态。Debug 明确受 OpenIDEA Plugin API 限制。
 - 阶段 4：依赖图、缺失依赖、循环检测、图节点运行、2 MiB 持久缓存上限、
