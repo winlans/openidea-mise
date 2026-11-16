@@ -148,11 +148,11 @@ jobs:
           git -C "$registry" commit -m "chore: publish winlans.mise $VERSION"
           git -C "$registry" push --force fork "HEAD:refs/heads/$branch"
 
-          existing="$(gh pr list \
-            --repo l0ng-ai/openidea-plugins \
-            --head "winlans:$branch" \
-            --state open \
-            --json number \
+          existing="$(gh api --method GET \
+            repos/l0ng-ai/openidea-plugins/pulls \
+            -f state=open \
+            -f "head=winlans:$branch" \
+            -f base=main \
             --jq '.[0].number // empty')"
           title="chore: publish winlans.mise $VERSION"
           body="Automated registry update for winlans.mise $VERSION.
