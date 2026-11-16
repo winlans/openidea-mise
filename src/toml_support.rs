@@ -1661,11 +1661,13 @@ fn is_dependency_position(source: &str, at: Position) -> bool {
 fn word_range(source: &str, at: Position) -> Option<Range> {
     let offset = text::offset(source, at)?;
     let word = |character: char| {
-        character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':' | '/' | '@')
+        character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | ':' | '/' | '@')
     };
     let start = source[..offset]
-        .rfind(|character: char| !word(character))
-        .map_or(0, |index| index + 1);
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !word(*character))
+        .map_or(0, |(index, character)| index + character.len_utf8());
     let end = source[offset..]
         .find(|character: char| !word(character))
         .map_or(source.len(), |index| offset + index);
@@ -1884,6 +1886,44 @@ depends = [
         );
 
         assert!(items.iter().any(|item| item.label == "lint"));
+    }
+
+    #[test]
+    fn provider_completion_ranges_stay_on_unicode_character_boundaries() {
+        let _host = MockHost::install().with_capabilities(&["project.read", "storage"]);
+
+        for (typed, expected_replacement) in
+            [("构建", "构建"), ("🚀build", "build"), ("build", "build")]
+        {
+            let source = format!("[tasks.test]\ndepends = [\"{typed}\"]\n");
+            let prefix = format!("depends = [\"{typed}");
+            let doc = ProviderDocument {
+                path: "/project/mise.toml".into(),
+                language: "toml".into(),
+                version: 1,
+                text: source,
+            };
+            let mut provider = crate::OpenideaMise::default();
+            let items = <crate::OpenideaMise as openidea_plugin::providers::Providers>::completion(
+                &mut provider,
+                &doc,
+                Position::new(1, prefix.encode_utf16().count() as u32),
+                None,
+            );
+
+            assert!(
+                !items.is_empty(),
+                "completion returned no items for {typed:?}"
+            );
+            for item in items {
+                let replace = item.replace.expect("dependency completion replacement");
+                let start = text::offset(&doc.text, replace.start).expect("valid range start");
+                let end = text::offset(&doc.text, replace.end).expect("valid range end");
+                assert!(doc.text.is_char_boundary(start));
+                assert!(doc.text.is_char_boundary(end));
+                assert_eq!(&doc.text[start..end], expected_replacement);
+            }
+        }
     }
 
     #[test]
