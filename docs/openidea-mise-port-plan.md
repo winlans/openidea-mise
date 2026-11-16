@@ -50,6 +50,9 @@ OpenIDEA smoke test 都通过后才算完成。
 底部工具窗口包含 Tasks、Graph、Tools、Configuration、Environment 五个页签。
 Tasks 支持搜索、刷新和运行；Configuration 展示 Mise CLI 报告的配置加载链及
 task/tool 有效来源；Tools 展示安装与激活状态；Environment 默认遮盖敏感变量。
+Tools 按有效配置来源分组，明确区分嵌套项目、当前项目、父级继承、用户全局、
+系统配置以及仅安装但未被当前配置选中的版本；每组展示配置路径和 tier/override
+元数据，避免在每个工具行重复来源。
 环境值只保存在当前 Wasm 实例内，不写入 storage、日志或发布 artifact。
 
 默认上下文跟随当前编辑器文件所在目录，通过 `mise -C <directory>` 让 Mise
@@ -151,7 +154,8 @@ Registry entry 固定为 `plugins/winlans.mise.toml`，首个版本同时注册
 - 阶段 1：Tasks、Graph、Tools、Configuration、Environment 工具窗口、脱敏、
   缓存和动态 Run Configuration 已实现。Mise 配置继承由 CLI 负责，工具窗口
   默认跟随编辑器目录，并按 `project + context` 隔离快照。未信任配置提供明确的
-  Trust/Cancel 操作。
+  Trust/Cancel 操作。Tools 按生效配置文件结构化分组，并单独列出未被当前配置
+  选中的已安装版本。
 - 工具窗口已迁移为包内静态 Web View（`web/index.html`）。页面通过
   `openidea.postMessage` / `openidea.onMessage` 与 Wasm 后端交换快照，
   使用 `header = "none"` 去除重复的宿主标题行，并把刷新操作放在页签栏。

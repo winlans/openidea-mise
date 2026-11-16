@@ -1334,6 +1334,11 @@ mod tests {
         assert!(PAGE.contains("Mise configuration has unsaved changes"));
         assert!(PAGE.contains("Cancel"));
         assert!(PAGE.contains(r#"id="refresh""#));
+        assert!(PAGE.contains("toolSourceInfo"));
+        assert!(PAGE.contains(r#"make("div", "tool-groups")"#));
+        assert!(PAGE.contains("Nested project"));
+        assert!(PAGE.contains("Installed only"));
+        assert!(PAGE.contains("Installed by Mise but not selected by the current configuration"));
         assert!(!PAGE.contains("<strong>Mise</strong>"));
         assert!(MANIFEST.contains(r#"web = "web/index.html""#));
         assert!(MANIFEST.contains(r#"header = "none""#));

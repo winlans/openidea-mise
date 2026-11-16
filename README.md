@@ -11,6 +11,9 @@ The port is implemented against OpenIDEA Plugin API 1.8 and runs as a sandboxed
 
 - Browse, search and run `mise` tasks from the Mise tool window.
 - Inspect installed tools and the environment reported by the current project.
+  Tools are grouped by the configuration that selected them, with distinct
+  nested-project, project, inherited, global, system, and unselected-installed
+  sections.
 - Follow Mise's parent, global, local, environment-specific, and nested
   configuration hierarchy from the active editor directory. The Configuration
   tab shows the files reported by `mise config ls --json` and the effective

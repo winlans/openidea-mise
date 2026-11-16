@@ -71,6 +71,35 @@
     .detail { color: var(--openidea-fg-muted); overflow-wrap: anywhere; }
     .status-ok { color: var(--openidea-success); }
     .status-off { color: var(--openidea-fg-muted); }
+    .tool-groups { display: grid; gap: 12px; }
+    .tool-group {
+      min-width: 0; overflow: hidden;
+      border: 1px solid var(--openidea-border); border-radius: 6px;
+      background: var(--openidea-bg);
+    }
+    .tool-group-header {
+      display: flex; align-items: center; gap: 8px; min-width: 0;
+      padding: 7px 8px; border-bottom: 1px solid var(--openidea-border);
+      background: var(--openidea-bg-elevated);
+    }
+    .tool-group-source { min-width: 0; flex: 1; }
+    .tool-group-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+    .tool-group-path {
+      margin-top: 2px; color: var(--openidea-fg-muted);
+      font-family: var(--openidea-font-mono); overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .tool-group-count { color: var(--openidea-fg-muted); white-space: nowrap; }
+    .scope-badge, .tier-badge {
+      display: inline-block; padding: 1px 6px; border-radius: 9px;
+      color: var(--openidea-fg-muted); background: var(--openidea-bg);
+      border: 1px solid var(--openidea-border); font-size: .9em;
+    }
+    .scope-badge.project, .scope-badge.nested { color: var(--openidea-accent); }
+    .scope-badge.global { color: var(--openidea-success); }
+    .scope-badge.system { color: var(--openidea-warning); }
+    .tool-group table th { top: -10px; }
+    .tool-group table tr:last-child td { border-bottom: 0; }
     .errors { display: grid; gap: 6px; padding: 8px 10px; }
     .error {
       border-left: 3px solid var(--openidea-warning); background: var(--openidea-bg-elevated);
@@ -260,6 +289,55 @@
       const sourceName = source => {
         const normalized = text(source).replaceAll("\\", "/");
         return normalized.split("/").pop() || normalized;
+      };
+      const normalizePath = value => text(value).replaceAll("\\", "/").replace(/\/+$/, "");
+      const comparablePath = value => {
+        const normalized = normalizePath(value);
+        return /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("//")
+          ? normalized.toLocaleLowerCase()
+          : normalized;
+      };
+      const scopeDetails = scope => ({
+        nested: ["Nested project", 0],
+        project: ["Project", 1],
+        inherited: ["Inherited", 2],
+        global: ["Global", 3],
+        system: ["System", 4],
+        installed: ["Installed only", 5],
+        unknown: ["Other", 6]
+      })[scope] || ["Other", 6];
+      const inferredToolScope = path => {
+        const comparable = comparablePath(path);
+        const project = comparablePath(state.project);
+        if (project && (comparable === project || comparable.startsWith(`${project}/`))) {
+          return "inherited";
+        }
+        if (comparable === "/etc/mise" || comparable.startsWith("/etc/mise/")) return "system";
+        if (comparable.includes("/.config/mise/") || comparable.endsWith("/.config/mise")) return "global";
+        return "inherited";
+      };
+      const toolSourceInfo = tool => {
+        const path = normalizePath(tool.source);
+        if (!path) {
+          return {
+            key: "installed:",
+            path: "",
+            scope: "installed",
+            tier: "",
+            overrideFile: false
+          };
+        }
+        const comparable = comparablePath(path);
+        const config = (state.configs || []).find(candidate =>
+          comparablePath(candidate.path) === comparable
+        );
+        return {
+          key: `source:${comparable}`,
+          path,
+          scope: text(config && config.scope) || inferredToolScope(path),
+          tier: text(config && config.tier),
+          overrideFile: Boolean(config && config.override_file)
+        };
       };
       const matches = (...values) => {
         const query = byId("search").value.trim().toLocaleLowerCase();
@@ -547,21 +625,70 @@
           host.append(make("div", "empty", "No Mise-managed tools found"));
           return;
         }
-        const grid = table(["Tool", "Version", "Requested", "State", "Source"]);
-        const body = grid.tBodies[0];
+
+        const groupsBySource = new Map();
         tools.forEach(tool => {
-          const row = make("tr");
-          const status = tool.active ? "Active" : tool.installed ? "Installed" : "Missing";
-          row.append(
-            make("td", "name", tool.name),
-            make("td", "name", tool.version),
-            make("td", "detail", tool.requested_version),
-            make("td", tool.active ? "status-ok" : "status-off", status),
-            make("td", "detail", sourceName(tool.source))
-          );
-          body.append(row);
+          const source = toolSourceInfo(tool);
+          const group = groupsBySource.get(source.key) || {...source, tools: []};
+          group.tools.push(tool);
+          groupsBySource.set(source.key, group);
         });
-        host.append(grid);
+        const groups = [...groupsBySource.values()].sort((left, right) => {
+          const leftScope = scopeDetails(left.scope);
+          const rightScope = scopeDetails(right.scope);
+          return leftScope[1] - rightScope[1]
+            || left.path.localeCompare(right.path);
+        });
+
+        const groupList = make("div", "tool-groups");
+        groups.forEach(group => {
+          group.tools.sort((left, right) =>
+            text(left.name).localeCompare(text(right.name))
+            || Number(Boolean(right.active)) - Number(Boolean(left.active))
+            || text(left.version).localeCompare(text(right.version))
+          );
+          const section = make("section", "tool-group");
+          const header = make("div", "tool-group-header");
+          const source = make("div", "tool-group-source");
+          const title = make("div", "tool-group-title");
+          const [scopeLabel] = scopeDetails(group.scope);
+          title.append(make("span", `scope-badge ${group.scope}`, scopeLabel));
+          if (group.overrideFile) {
+            title.append(make("span", "tier-badge", "override"));
+          } else if (group.tier) {
+            title.append(make("span", "tier-badge", group.tier));
+          }
+          const path = make(
+            "div",
+            "tool-group-path",
+            group.path || "Installed by Mise but not selected by the current configuration"
+          );
+          path.title = group.path;
+          source.append(title, path);
+          const toolNames = new Set(group.tools.map(tool => text(tool.name))).size;
+          const versions = group.tools.length;
+          const count = versions === toolNames
+            ? `${toolNames} tool${toolNames === 1 ? "" : "s"}`
+            : `${toolNames} tool${toolNames === 1 ? "" : "s"}, ${versions} versions`;
+          header.append(source, make("span", "tool-group-count", count));
+
+          const grid = table(["Tool", "Version", "Requested", "State"]);
+          const body = grid.tBodies[0];
+          group.tools.forEach(tool => {
+            const row = make("tr");
+            const status = tool.active ? "Active" : tool.installed ? "Installed" : "Missing";
+            row.append(
+              make("td", "name", tool.name),
+              make("td", "name", tool.version),
+              make("td", "detail", tool.requested_version || "—"),
+              make("td", tool.active ? "status-ok" : "status-off", status)
+            );
+            body.append(row);
+          });
+          section.append(header, grid);
+          groupList.append(section);
+        });
+        host.append(groupList);
       }
       function renderConfiguration() {
         const host = byId("configuration");
