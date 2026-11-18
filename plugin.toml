@@ -1,6 +1,6 @@
 id = "winlans.mise"
 name = "Mise"
-version = "0.2.0"
+version = "0.3.0"
 description = "Run mise tasks, inspect tools and environment, and execute project runs through mise."
 authors = ["winlans <winlans@outlook.com>"]
 homepage = "https://github.com/winlans/openidea-mise"
