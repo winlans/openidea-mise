@@ -6,7 +6,7 @@ rust = { version = "1.98.1", profile = "minimal", components = ["clippy", "rustf
 
 [env]
 CARGO_TERM_COLOR = "always"
-OPENIDEA_CLI_VERSION = "0.1.45"
+OPENIDEA_CLI_VERSION = "0.1.47"
 
 [tasks.setup]
 description = "Install the pinned OpenIDEA plugin CLI when it is missing or outdated"

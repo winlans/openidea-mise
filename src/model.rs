@@ -26,6 +26,18 @@ pub struct MiseTask {
     pub dir: String,
     #[serde(default)]
     pub hidden: bool,
+    /// Full task commands are used only for debugger inference and are never
+    /// persisted in the plugin cache or sent to the WebView.
+    #[serde(default, skip_serializing)]
+    pub run: Vec<String>,
+    /// The source file of a file task, when Mise reports one. Like `run`, this
+    /// is intentionally excluded from serialized snapshots.
+    #[serde(default, skip_serializing)]
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_command_contains: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +173,9 @@ pub fn parse_tasks(text: &str) -> Result<Vec<MiseTask>, String> {
         let Some(name) = string_field(row, "name") else {
             continue;
         };
+        let run = string_or_list(row.get("run"));
+        let file = string_field(row, "file").unwrap_or_default();
+        let debug_kind = infer_debug_kind(&file, &run).map(str::to_owned);
         tasks.push(MiseTask {
             name,
             aliases: string_list(row.get("aliases")),
@@ -171,6 +186,10 @@ pub fn parse_tasks(text: &str) -> Result<Vec<MiseTask>, String> {
             wait_for: task_refs(row.get("wait_for")),
             dir: string_field(row, "dir").unwrap_or_default(),
             hidden: row.get("hide").and_then(Value::as_bool).unwrap_or(false),
+            run,
+            file,
+            debug_kind,
+            debug_command_contains: None,
         });
     }
     tasks.sort_by(|left, right| left.name.cmp(&right.name));
@@ -369,6 +388,113 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
+fn string_or_list(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::String(value)) => vec![value.clone()],
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn infer_debug_kind(file: &str, run: &[String]) -> Option<&'static str> {
+    debug_kind_from_path(file).or_else(|| {
+        run.iter()
+            .find_map(|command| debug_kind_from_command(command))
+    })
+}
+
+fn debug_kind_from_path(path: &str) -> Option<&'static str> {
+    let extension = path
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())?;
+    match extension.as_str() {
+        "js" | "cjs" | "mjs" | "ts" | "cts" | "mts" => Some("node"),
+        "py" | "pyw" => Some("python"),
+        "go" => Some("go"),
+        "dll" => Some("dotnet"),
+        _ => None,
+    }
+}
+
+fn debug_kind_from_command(command: &str) -> Option<&'static str> {
+    for segment in command.split(['\n', ';', '|', '&']) {
+        let mut words = segment
+            .split_ascii_whitespace()
+            .map(clean_command_word)
+            .filter(|word| !word.is_empty())
+            .peekable();
+        while let Some(word) = words.next() {
+            if is_environment_assignment(word)
+                || matches!(word, "command" | "exec" | "env" | "nohup")
+            {
+                continue;
+            }
+            if word == "mise" {
+                let Some(subcommand) = words.next() else {
+                    break;
+                };
+                if matches!(subcommand, "exec" | "x") {
+                    for nested in words.by_ref() {
+                        if nested == "--" {
+                            break;
+                        }
+                    }
+                    if let Some(nested) = words.next() {
+                        return classify_debug_program(nested);
+                    }
+                }
+                break;
+            }
+            return classify_debug_program(word);
+        }
+    }
+    None
+}
+
+fn clean_command_word(word: &str) -> &str {
+    word.trim_matches(|character: char| {
+        matches!(
+            character,
+            '\'' | '"' | '`' | '(' | ')' | '{' | '}' | '[' | ']' | ','
+        )
+    })
+}
+
+fn is_environment_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn classify_debug_program(program: &str) -> Option<&'static str> {
+    let program = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    match program.as_str() {
+        "node" | "nodejs" | "tsx" | "ts-node" => Some("node"),
+        "python" | "python2" | "python3" | "pytest" | "py.test" | "uv" | "uvicorn" | "gunicorn" => {
+            Some("python")
+        }
+        "dotnet" => Some("dotnet"),
+        // `go run` and package-manager wrappers are deliberately not inferred:
+        // their launcher is itself a debuggable process and OpenIDEA could
+        // attach before the user's child process starts. Users can override
+        // these tasks with `debugTaskRules` and `commandContains`.
+        _ => None,
+    }
+}
+
 fn task_refs(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
@@ -510,6 +636,41 @@ mod tests {
         assert_eq!(tasks[0].name, "build");
         assert_eq!(tasks[0].depends, ["lint", "prepare"]);
         assert_eq!(tasks[0].wait_for, ["service"]);
+    }
+
+    #[test]
+    fn infers_only_debuggers_that_can_safely_attach_to_the_task_process() {
+        let tasks = parse_tasks(
+            r#"[
+              {"name":"node","run":["node server.mjs"]},
+              {"name":"python","run":["API_ENV=test uv run app.py"]},
+              {"name":"dotnet","run":["dotnet run"]},
+              {"name":"file-task","file":"/project/.mise/tasks/check.py"},
+              {"name":"npm-wrapper","run":["npm run dev"]},
+              {"name":"go-wrapper","run":["go run ./cmd/server"]}
+            ]"#,
+        )
+        .unwrap();
+        let kinds: BTreeMap<_, _> = tasks
+            .iter()
+            .map(|task| (task.name.as_str(), task.debug_kind.as_deref()))
+            .collect();
+        assert_eq!(kinds["node"], Some("node"));
+        assert_eq!(kinds["python"], Some("python"));
+        assert_eq!(kinds["dotnet"], Some("dotnet"));
+        assert_eq!(kinds["file-task"], Some("python"));
+        assert_eq!(kinds["npm-wrapper"], None);
+        assert_eq!(kinds["go-wrapper"], None);
+    }
+
+    #[test]
+    fn task_commands_are_not_serialized_into_cached_or_web_snapshots() {
+        let task = parse_tasks(r#"[{"name":"deploy","run":["echo super-secret"]}]"#)
+            .unwrap()
+            .remove(0);
+        let serialized = serde_json::to_string(&task).unwrap();
+        assert!(!serialized.contains("super-secret"));
+        assert!(!serialized.contains("\"run\""));
     }
 
     #[test]

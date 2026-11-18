@@ -96,7 +96,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "openidea-mise"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "openidea-plugin",
  "serde",
@@ -107,7 +107,7 @@ dependencies = [
 [[package]]
 name = "openidea-plugin"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/openidea?tag=v0.1.45#c5be2998ec7190567c9da8a6f375aeda4becad2e"
+source = "git+https://github.com/l0ng-ai/openidea?tag=v0.1.47#0590a255e85e9f5d2bf0484092e9a9d6ac6911f3"
 dependencies = [
  "serde",
  "serde_json",

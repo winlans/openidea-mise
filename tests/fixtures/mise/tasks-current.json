@@ -8,7 +8,9 @@
     "depends_post": ["notify"],
     "wait_for": [],
     "dir": "/workspace",
-    "hide": false
+    "hide": false,
+    "run": ["node scripts/build.mjs"],
+    "file": null
   },
   {
     "name": "lint",
@@ -19,6 +21,8 @@
     "depends_post": [],
     "wait_for": [],
     "dir": "/workspace",
-    "hide": false
+    "hide": false,
+    "run": ["cargo fmt --check"],
+    "file": null
   }
 ]

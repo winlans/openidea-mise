@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0](https://github.com/winlans/openidea-mise/compare/v0.1.1...v0.2.0) (2026-11-18)
+
+* add compatible Run/Launch Configuration exports with task debugger metadata
+  and overrides
+* improve Mise hierarchy-aware tools, TOML/File Task support, and project
+  context handling
+* upgrade to OpenIDEA CLI v0.1.47 / Plugin API 1.10 and harden task execution,
+  Run Target discovery, trust handling, and WebView refresh
+
 ## [0.1.1](https://github.com/winlans/openidea-mise/compare/v0.1.0...v0.1.1) (2026-11-16)
 
 

@@ -7,17 +7,27 @@ mod toml_support;
 use crate::model::{MiseTask, Snapshot, task_configuration_id};
 use openidea_plugin::views::{View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Error, Event, Invocation, NotificationLevel, Plugin, PluginRunConfiguration, PluginRunTarget,
-    RunConfigurations, RunTargetLaunch, RunTargetValidation, host, register_plugin,
+    Debugger, Error, Event, Invocation, LaunchConfigurations, NotificationLevel, Plugin,
+    PluginLaunchConfiguration, PluginRunConfiguration, PluginRunTarget, RunConfigurations,
+    RunTargetLaunch, RunTargetValidation, host, register_plugin,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 const VIEW: &str = "mise";
-
 #[derive(Default)]
 pub struct OpenideaMise {
     snapshots: BTreeMap<String, Snapshot>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DebugTaskRule {
+    task: String,
+    debugger: String,
+    #[serde(default)]
+    command_contains: String,
 }
 
 impl OpenideaMise {
@@ -71,7 +81,7 @@ impl OpenideaMise {
         // ever opened. Refresh just the inexpensive task list here so the
         // first Run/Debug chooser already contains the project's Mise tasks.
         // A transient CLI failure keeps the last good cache available.
-        match mise::tasks(&project, root) {
+        match load_tasks(&project, root) {
             Ok(tasks) => {
                 snapshot.project = root.to_owned();
                 snapshot.context = root.to_owned();
@@ -87,8 +97,6 @@ impl OpenideaMise {
             }
             Err(_) => {}
         }
-        let _ = configure_run_target(&project);
-        let _ = configure_file_icons(&project, &snapshot);
         snapshot
     }
 
@@ -104,7 +112,7 @@ impl OpenideaMise {
         snapshot.errors.clear();
         snapshot.trust_required = false;
 
-        match mise::tasks(project, context) {
+        match load_tasks(project, context) {
             Ok(tasks) => snapshot.tasks = tasks,
             Err(error) if mise::requires_trust(&error) => {
                 snapshot.tasks.clear();
@@ -139,11 +147,6 @@ impl OpenideaMise {
 
         if let Err(error) = state::save(&snapshot) {
             snapshot.errors.push(format!("Cache: {error}"));
-        }
-        if let Err(error) = configure_run_target(project)
-            && !matches!(error, Error::Denied(_))
-        {
-            snapshot.errors.push(format!("Run target: {error}"));
         }
         if let Err(error) = configure_file_icons(project, &snapshot)
             && !matches!(error, Error::Denied(_))
@@ -221,7 +224,8 @@ impl OpenideaMise {
             }
         };
         if same_path(&root, &context) {
-            match host::start_run(&task_configuration_id(&task_name), &[], false) {
+            let configuration = task_configuration_id(&task_name);
+            match host::start_run(&configuration, &[], false) {
                 Ok(operation) => return Ok(Some(operation)),
                 Err(run_error) => {
                     return self.open_task_terminal(&task_name, &root, &context, Some(&run_error));
@@ -421,6 +425,17 @@ impl Views for OpenideaMise {
                 let request_id = message_request_id(&value);
                 match value.get("op").and_then(Value::as_str) {
                     Some(operation @ ("ready" | "refresh" | "sync")) => {
+                        // Run configuration exports are called while OpenIDEA is
+                        // rebuilding its detector cache. Registering a Run Target
+                        // from that export emits RunTargetsChanged before the new
+                        // configurations have been committed, leaving the selected
+                        // plugin configuration temporarily orphaned. Keep target
+                        // registration on explicit lifecycle/UI paths instead.
+                        if operation == "ready"
+                            && let Ok((project, _)) = Self::root(ctx)
+                        {
+                            let _ = configure_run_target(&project);
+                        }
                         let refresh = operation != "sync";
                         match self.post_snapshot(ctx, refresh, session_id, request_id) {
                             Ok(()) => Ok(()),
@@ -435,7 +450,10 @@ impl Views for OpenideaMise {
                         let name = value.get("task").and_then(Value::as_str);
                         match self.run_task(ctx, name) {
                             Ok(_) => post_message(
-                                json!({"op":"runStarted","task":name.unwrap_or_default()}),
+                                json!({
+                                    "op":"runStarted",
+                                    "task":name.unwrap_or_default()
+                                }),
                                 session_id,
                                 request_id,
                             ),
@@ -474,13 +492,28 @@ impl Views for OpenideaMise {
     }
 }
 
+impl LaunchConfigurations for OpenideaMise {
+    fn launch_configurations(&mut self, project_root: &str) -> Vec<PluginLaunchConfiguration> {
+        let snapshot = self.snapshot_for_run_configurations(project_root);
+        snapshot
+            .tasks
+            .iter()
+            .map(|task| launch_configuration(project_root, task))
+            .collect()
+    }
+}
+
+/// Keep the API 1.4 run-configuration export alongside the richer API 1.9+
+/// launch-configuration export. New hosts prefer the latter, while hosts and
+/// integrations that still consume the legacy export can run the same Mise
+/// tasks without losing them from the Run selector.
 impl RunConfigurations for OpenideaMise {
     fn configurations(&mut self, project_root: &str) -> Vec<PluginRunConfiguration> {
         let snapshot = self.snapshot_for_run_configurations(project_root);
         snapshot
             .tasks
             .iter()
-            .map(|task| run_configuration(project_root, task))
+            .map(|task| launch_configuration(project_root, task).config)
             .collect()
     }
 }
@@ -517,15 +550,247 @@ impl RunTargetValidation for OpenideaMise {
     }
 }
 
-fn run_configuration(project_root: &str, task: &MiseTask) -> PluginRunConfiguration {
-    PluginRunConfiguration {
-        id: task_configuration_id(&task.name),
-        name: task.name.clone(),
-        program: "mise".into(),
-        args: vec!["run".into(), task.name.clone()],
-        cwd: Some(project_root.into()),
-        test: false,
-        framework: None,
+fn launch_configuration(project_root: &str, task: &MiseTask) -> PluginLaunchConfiguration {
+    PluginLaunchConfiguration {
+        config: PluginRunConfiguration {
+            id: task_configuration_id(&task.name),
+            name: task.name.clone(),
+            program: "mise".into(),
+            args: vec!["run".into(), task.name.clone()],
+            cwd: Some(project_root.into()),
+            test: false,
+            framework: None,
+        },
+        env: Vec::new(),
+        debugger: task.debug_kind.as_ref().map(|kind| Debugger::AttachChild {
+            kind: kind.clone(),
+            command_contains: task.debug_command_contains.clone(),
+        }),
+    }
+}
+
+fn load_tasks(project: &openidea_plugin::Project, context: &str) -> Result<Vec<MiseTask>, String> {
+    let mut tasks = mise::tasks(project, context)?;
+    infer_package_script_debuggers(project, context, &mut tasks);
+    apply_debug_task_rules(&mut tasks);
+    Ok(tasks)
+}
+
+fn infer_package_script_debuggers(
+    project: &openidea_plugin::Project,
+    context: &str,
+    tasks: &mut [MiseTask],
+) {
+    let mut manifests: BTreeMap<String, Option<Value>> = BTreeMap::new();
+    for task in tasks.iter_mut().filter(|task| task.debug_kind.is_none()) {
+        let Some(script_name) = package_script_name(&task.run) else {
+            continue;
+        };
+        let directory = task_working_directory(context, &task.dir);
+        let package_json = join_path(&directory, "package.json");
+        let manifest = manifests.entry(package_json.clone()).or_insert_with(|| {
+            project
+                .read_file(&package_json)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        });
+        let Some(command) = manifest
+            .as_ref()
+            .and_then(|value| value.get("scripts"))
+            .and_then(Value::as_object)
+            .and_then(|scripts| scripts.get(&script_name))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(command_contains) = node_package_script_program(command) else {
+            continue;
+        };
+        task.debug_kind = Some("node".into());
+        task.debug_command_contains = Some(command_contains);
+    }
+}
+
+fn package_script_name(commands: &[String]) -> Option<String> {
+    for command in commands {
+        for segment in command.split(['\n', ';', '|', '&']) {
+            let words: Vec<_> = segment
+                .split_ascii_whitespace()
+                .map(clean_shell_word)
+                .filter(|word| !word.is_empty())
+                .collect();
+            let mut index = 0;
+            while index < words.len()
+                && (is_shell_environment_assignment(words[index])
+                    || matches!(words[index], "command" | "exec" | "env" | "nohup"))
+            {
+                index += 1;
+            }
+            if words.get(index).is_some_and(|word| *word == "corepack") {
+                index += 1;
+            }
+            let Some(manager) = words.get(index).map(|word| command_basename(word)) else {
+                continue;
+            };
+            index += 1;
+            while words.get(index).is_some_and(|word| word.starts_with('-')) {
+                index += 1;
+            }
+            let subcommand = words.get(index).copied();
+            if matches!(manager.as_str(), "npm" | "pnpm" | "yarn" | "bun")
+                && matches!(subcommand, Some("run" | "run-script"))
+                && let Some(script) = words.get(index + 1)
+                && !script.starts_with('-')
+            {
+                return Some((*script).to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn node_package_script_program(command: &str) -> Option<String> {
+    const NODE_PROGRAMS: &[&str] = &[
+        "astro",
+        "ava",
+        "eslint",
+        "jest",
+        "mocha",
+        "nest",
+        "next",
+        "nodemon",
+        "node",
+        "nodejs",
+        "nuxt",
+        "nuxi",
+        "prettier",
+        "react-scripts",
+        "remix",
+        "rollup",
+        "storybook",
+        "ts-node",
+        "tsc",
+        "tsx",
+        "vite",
+        "vite-node",
+        "vitest",
+        "vue-cli-service",
+        "vue-tsc",
+        "webpack",
+        "webpack-cli",
+        "webpack-dev-server",
+    ];
+    for segment in command.split(['\n', ';', '|', '&']) {
+        let words: Vec<_> = segment
+            .split_ascii_whitespace()
+            .map(clean_shell_word)
+            .filter(|word| !word.is_empty())
+            .collect();
+        let mut index = 0;
+        while index < words.len() {
+            let word = words[index];
+            if is_shell_environment_assignment(word)
+                || matches!(
+                    word,
+                    "command" | "exec" | "env" | "nohup" | "cross-env" | "cross-env-shell" | "npx"
+                )
+            {
+                index += 1;
+                continue;
+            }
+            let program = command_basename(word);
+            if !NODE_PROGRAMS.contains(&program.as_str()) {
+                break;
+            }
+            if matches!(program.as_str(), "node" | "nodejs")
+                && let Some(script) = words[index + 1..]
+                    .iter()
+                    .find(|argument| !argument.starts_with('-'))
+            {
+                let script = command_basename(script);
+                if !script.is_empty() {
+                    return Some(script);
+                }
+            }
+            return Some(program);
+        }
+    }
+    None
+}
+
+fn task_working_directory(context: &str, directory: &str) -> String {
+    let directory = directory.trim();
+    if directory.is_empty() {
+        return normalize_path(context);
+    }
+    if is_absolute_path(directory) {
+        normalize_path(directory)
+    } else {
+        join_path(context, directory)
+    }
+}
+
+fn join_path(parent: &str, child: &str) -> String {
+    format!(
+        "{}/{}",
+        normalize_path(parent).trim_end_matches('/'),
+        child.trim_start_matches(['/', '\\'])
+    )
+}
+
+fn is_absolute_path(path: &str) -> bool {
+    path.starts_with(['/', '\\']) || path.as_bytes().get(1) == Some(&b':') || path.starts_with("//")
+}
+
+fn clean_shell_word(word: &str) -> &str {
+    word.trim_matches(|character: char| {
+        matches!(
+            character,
+            '\'' | '"' | '`' | '(' | ')' | '{' | '}' | '[' | ']' | ','
+        )
+    })
+}
+
+fn is_shell_environment_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn command_basename(program: &str) -> String {
+    program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase()
+}
+
+fn apply_debug_task_rules(tasks: &mut [MiseTask]) {
+    let rules = host::setting("debugTaskRules")
+        .and_then(|value| serde_json::from_str::<Vec<DebugTaskRule>>(&value).ok())
+        .unwrap_or_default();
+    for task in tasks {
+        let Some(rule) = rules.iter().rev().find(|rule| rule.task == task.name) else {
+            continue;
+        };
+        match rule.debugger.as_str() {
+            "auto" => {}
+            "disabled" => {
+                task.debug_kind = None;
+                task.debug_command_contains = None;
+            }
+            "node" | "python" | "go" | "dotnet" | "native" => {
+                task.debug_kind = Some(rule.debugger.clone());
+                task.debug_command_contains = (!rule.command_contains.trim().is_empty())
+                    .then(|| rule.command_contains.trim().to_owned());
+            }
+            _ => {}
+        }
     }
 }
 
@@ -831,6 +1096,7 @@ register_plugin!(
     OpenideaMise,
     views,
     run_configurations,
+    launch_configurations,
     run_target_validation,
     providers,
     hover,
@@ -858,7 +1124,7 @@ mod tests {
         host.on_process("mise", |args, _| {
             let stdout = match args {
                 [a, b, c] if a == "tasks" && b == "ls" && c == "--json" => {
-                    r#"[{"name":"build","aliases":[],"description":"Build","source":"/project/mise.toml","depends":["lint"],"depends_post":[],"wait_for":[],"dir":"/project","hide":false}]"#
+                    r#"[{"name":"build","aliases":[],"description":"Build","source":"/project/mise.toml","depends":["lint"],"depends_post":[],"wait_for":[],"dir":"/project","hide":false,"run":["node scripts/build.mjs"],"file":null}]"#
                 }
                 [a, b] if a == "ls" && b == "--json" => {
                     r#"{"node":[{"version":"22.0.0","requested_version":"22","source":{"path":"/project/mise.toml"},"installed":true,"active":true}]}"#
@@ -885,13 +1151,20 @@ mod tests {
         assert_eq!(snapshot.tools[0].name, "node");
         assert!(snapshot.environment[0].sensitive);
 
-        let configs = plugin.configurations("/project");
-        assert_eq!(configs[0].name, "build");
-        assert_eq!(configs[0].program, "mise");
-        assert_eq!(configs[0].args, ["run", "build"]);
+        let configs = plugin.launch_configurations("/project");
+        assert_eq!(configs[0].config.name, "build");
+        assert_eq!(configs[0].config.program, "mise");
+        assert_eq!(configs[0].config.args, ["run", "build"]);
+        assert!(matches!(
+            configs[0].debugger,
+            Some(Debugger::AttachChild { ref kind, command_contains: None }) if kind == "node"
+        ));
 
         let mut reloaded = OpenideaMise::default();
-        assert_eq!(reloaded.configurations("/project")[0].name, "build");
+        assert_eq!(
+            reloaded.launch_configurations("/project")[0].config.name,
+            "build"
+        );
         assert!(
             reloaded
                 .snapshot("/project", "/project")
@@ -904,13 +1177,34 @@ mod tests {
     fn run_configurations_load_tasks_before_the_tool_window_opens() {
         let host = host_with_mise();
         let mut plugin = OpenideaMise::default();
+        host.set_setting("registerRunTarget", "true");
+
+        let configs = plugin.launch_configurations("/project");
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].config.name, "build");
+        assert_eq!(configs[0].config.args, ["run", "build"]);
+        assert_eq!(host.process_runs().len(), 1);
+        assert_eq!(host.process_runs()[0].args, ["tasks", "ls", "--json"]);
+        assert!(
+            host.run_targets().is_empty(),
+            "enumerating launch configurations must not mutate Run Targets"
+        );
+    }
+
+    #[test]
+    fn legacy_run_configurations_keep_mise_tasks_available() {
+        let host = host_with_mise();
+        let mut plugin = OpenideaMise::default();
 
         let configs = plugin.configurations("/project");
 
         assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].id, task_configuration_id("build"));
         assert_eq!(configs[0].name, "build");
+        assert_eq!(configs[0].program, "mise");
         assert_eq!(configs[0].args, ["run", "build"]);
-        assert_eq!(host.process_runs().len(), 1);
+        assert_eq!(configs[0].cwd.as_deref(), Some("/project"));
         assert_eq!(host.process_runs()[0].args, ["tasks", "ls", "--json"]);
     }
 
@@ -926,6 +1220,55 @@ mod tests {
         host.set_setting("registerRunTarget", "false");
         configure_run_target(&project).unwrap();
         assert!(host.run_targets().is_empty());
+    }
+
+    #[test]
+    fn package_manager_tasks_inherit_node_debugger_metadata_from_package_json() {
+        let host =
+            MockHost::install().with_capabilities(&["project.read", "storage", "process:mise"]);
+        host.set_project_root(Some("/project"));
+        host.add_file(
+            "package.json",
+            r#"{"scripts":{"dev":"vite serve --mode development","server":"node src/server.mjs"}}"#,
+        );
+        host.on_process("mise", |args, _| match args {
+            [a, b, c] if a == "tasks" && b == "ls" && c == "--json" => Ok(ProcessOutput {
+                status: Some(0),
+                stdout: r#"[
+                  {"name":"dev","dir":"/project","run":["npm run dev"]},
+                  {"name":"server","dir":"/project","run":["pnpm run server"]},
+                  {"name":"install","dir":"/project","run":["npm install"]}
+                ]"#
+                .into(),
+                stderr: String::new(),
+            }),
+            _ => Err(Error::Invalid(format!("unexpected mise args: {args:?}"))),
+        });
+        let mut plugin = OpenideaMise::default();
+
+        let configs = plugin.launch_configurations("/project");
+        let debugger = |name: &str| {
+            configs
+                .iter()
+                .find(|configuration| configuration.config.name == name)
+                .and_then(|configuration| configuration.debugger.as_ref())
+        };
+
+        assert!(matches!(
+            debugger("dev"),
+            Some(Debugger::AttachChild {
+                kind,
+                command_contains: Some(command)
+            }) if kind == "node" && command == "vite"
+        ));
+        assert!(matches!(
+            debugger("server"),
+            Some(Debugger::AttachChild {
+                kind,
+                command_contains: Some(command)
+            }) if kind == "node" && command == "server.mjs"
+        ));
+        assert_eq!(debugger("install"), None);
     }
 
     #[test]
@@ -1135,7 +1478,7 @@ mod tests {
             snapshot
                 .tasks
                 .iter()
-                .map(|task| run_configuration("/project", task))
+                .map(|task| launch_configuration("/project", task).config)
                 .collect(),
         );
         plugin.run_task(&host.invocation(), Some("build")).unwrap();
@@ -1143,6 +1486,36 @@ mod tests {
             host.configuration_runs()[0].1,
             task_configuration_id("build")
         );
+    }
+
+    #[test]
+    fn task_debugger_rules_override_or_disable_automatic_detection() {
+        let host = MockHost::install();
+        host.set_setting(
+            "debugTaskRules",
+            r#"[
+              {"task":"dev","debugger":"node","commandContains":"vite"},
+              {"task":"test","debugger":"disabled","commandContains":""}
+            ]"#,
+        );
+        let mut tasks = vec![
+            MiseTask {
+                name: "dev".into(),
+                ..Default::default()
+            },
+            MiseTask {
+                name: "test".into(),
+                debug_kind: Some("python".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_debug_task_rules(&mut tasks);
+
+        assert_eq!(tasks[0].debug_kind.as_deref(), Some("node"));
+        assert_eq!(tasks[0].debug_command_contains.as_deref(), Some("vite"));
+        assert_eq!(tasks[1].debug_kind, None);
+        assert_eq!(tasks[1].debug_command_contains, None);
     }
 
     #[test]
@@ -1332,6 +1705,7 @@ mod tests {
         assert!(PAGE.contains("scrollbar-color: var(--openidea-border) transparent"));
         assert!(PAGE.contains(r#"requestSnapshot("trust", true)"#));
         assert!(PAGE.contains("Mise configuration has unsaved changes"));
+        assert!(!PAGE.contains("Debug"));
         assert!(PAGE.contains("Cancel"));
         assert!(PAGE.contains(r#"id="refresh""#));
         assert!(PAGE.contains("toolSourceInfo"));
@@ -1356,6 +1730,10 @@ mod tests {
         assert_eq!(
             settings["properties"]["followEditorContext"]["default"],
             true
+        );
+        assert_eq!(
+            settings["properties"]["debugTaskRules"]["default"],
+            json!([])
         );
     }
 

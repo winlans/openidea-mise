@@ -21,8 +21,34 @@
     "registerRunTarget": {
       "type": "boolean",
       "title": "Offer Mise as a run target",
-      "description": "Make the mise exec wrapper available in the Run Target selector. Enabling it may add Mise to run-configuration labels when selected as the project target.",
+      "description": "Make the mise exec wrapper available in the Run Target selector for Run and Test. OpenIDEA does not currently support Debug on plugin-provided run targets; keep Local machine selected when debugging.",
       "default": false
+    },
+    "debugTaskRules": {
+      "type": "array",
+      "title": "Task debugger overrides",
+      "description": "Override automatic debugger detection for individual Mise tasks. Command contains narrows the child process selected by OpenIDEA.",
+      "default": [],
+      "items": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "title": "Task"
+          },
+          "debugger": {
+            "type": "string",
+            "title": "Debugger",
+            "enum": ["auto", "disabled", "node", "python", "go", "dotnet", "native"],
+            "default": "auto"
+          },
+          "commandContains": {
+            "type": "string",
+            "title": "Command contains",
+            "default": ""
+          }
+        }
+      }
     }
   }
 }

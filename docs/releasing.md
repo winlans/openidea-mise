@@ -20,7 +20,7 @@
 Marketplace 最终上线仍需要 `l0ng-ai/openidea-plugins` 维护者合并 PR。
 如果 Release 已创建但后续签名、上传或 registry 步骤失败，可在 Actions 中重新
 运行失败的 job；也可以手工触发 `Release` workflow，并输入已有 tag（例如
-`v0.1.0`）。手工重跑会覆盖同名 Release 资产，并复用同一个 registry 分支/PR。
+`v0.2.0`）。手工重跑会覆盖同名 Release 资产，并复用同一个 registry 分支/PR。
 
 ## 一次性 GitHub 配置
 
@@ -44,7 +44,7 @@ gh repo fork l0ng-ai/openidea-plugins --clone=false
 
 ## 首次生成 publisher key
 
-使用 OpenIDEA v0.1.45 的 CLI：
+使用 OpenIDEA v0.1.47 的 CLI：
 
 ```sh
 scripts/install-openidea-plugin.sh
@@ -54,7 +54,7 @@ chmod 0600 ~/.config/openidea-mise/signing.key
 base64 -w 0 ~/.config/openidea-mise/signing.key
 ```
 
-安装脚本固定校验 v0.1.45 Linux x86_64 release asset 的 SHA-256。升级 CLI
+安装脚本固定校验 v0.1.47 Linux x86_64 release asset 的 SHA-256。升级 CLI
 版本时必须在脚本中审查并更新摘要；临时测试其他版本时可显式设置
 `OPENIDEA_CLI_SHA256`，不要跳过校验。
 
@@ -99,7 +99,7 @@ tmp_dir="$(mktemp -d)"
 .tools/openidea-plugin keygen "$tmp_dir/test.key"
 OPENIDEA_PLUGIN_BIN=.tools/openidea-plugin \
 OPENIDEA_SIGNING_KEY_FILE="$tmp_dir/test.key" \
-scripts/build-package.sh 0.1.0
+scripts/build-package.sh 0.2.0
 ```
 
 生产包只能使用备份在 `~/.config/openidea-mise/signing.key` 和 GitHub

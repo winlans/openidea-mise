@@ -4,7 +4,7 @@ Mise integration for OpenIDEA. The plugin provides a project task center,
 installed-tool and environment inspection, dynamic run configurations, Mise TOML
 navigation and a `mise exec` run target.
 
-The port is implemented against OpenIDEA Plugin API 1.8 and runs as a sandboxed
+The port is implemented against OpenIDEA Plugin API 1.10 and runs as a sandboxed
 `wasm32-wasip2` component.
 
 ## Features
@@ -31,9 +31,17 @@ The port is implemented against OpenIDEA Plugin API 1.8 and runs as a sandboxed
   dependency navigation, diagnostics, highlighting, and Run gutter actions.
 - Apply the official Mise icon dynamically to recognized configuration files,
   File Task folders, and File Task sources in the project tree.
-- Use generated run configurations named exactly after each task. The optional
-  `mise.exec` Run Target is disabled by default so task labels stay compact; its
-  pre-launch validation rejects untrusted or out-of-project working directories.
+- Use generated Run Configurations named exactly after each task. The Tasks
+  view deliberately exposes Run only; debugging is done from the generated
+  configuration in OpenIDEA's Run/Debug selector. The plugin keeps the API 1.4
+  `run-configurations` export for compatibility and also supplies the API 1.9+
+  Launch Configuration export with environment and debugger metadata. Direct
+  Node.js, Python and .NET commands, plus supported File Tasks, can attach the
+  native OpenIDEA debugger. Per-task debugger overrides cover wrappers that
+  cannot be inferred safely.
+- Keep the optional `mise.exec` Run Target disabled by default so task labels
+  stay compact; its pre-launch validation rejects untrusted or out-of-project
+  working directories.
 
 Environment variables whose names look sensitive are masked by default. A
 revealed value remains in the current tool-window session and is never written
@@ -57,8 +65,22 @@ to plugin storage.
 The `mise.exec` Run Target can be enabled in the plugin settings when other run
 configurations should be wrapped with `mise exec --`. It is opt-in because
 selecting it as OpenIDEA's project-wide default appends a target label to every
-run configuration. OpenIDEA Plugin API 1.8 supports Run and Test through this
-target, but rejects Debug on plugin-provided targets.
+run configuration. OpenIDEA Plugin API 1.10 supports Run and Test through this
+target, but still rejects Debug on plugin-provided targets.
+
+Generated Mise task configurations are separate from that optional Run Target.
+On API 1.9+ hosts they are exposed as Launch Configurations; hosts and
+integrations using the legacy Run Configuration export still receive the same
+task names, commands, and working directories. They can use Debug from the
+Run/Debug selector when the plugin safely recognizes a direct Node.js, Python,
+.NET, JavaScript/TypeScript File Task, Python File Task, Go File Task, or DLL
+File Task command. For `npm run`, `pnpm run`, `yarn run`, and `bun run`, the
+plugin reads the matching `package.json` script and attaches only when it
+recognizes a Node.js tool, narrowing the child process by the script launcher
+(for example `vite`). Compiler wrappers such as `go run` are not guessed
+because the debugger could attach to the wrong child. Use **Task debugger
+overrides** in the Mise plugin settings for those tasks, optionally narrowing
+the child process with **Command contains**.
 
 The tool window follows the focused editor directory by default. Disable
 **Follow the active editor directory** in the plugin settings to resolve all
@@ -77,7 +99,7 @@ Requirements:
 
 - Rust 1.98.1 with `wasm32-wasip2`
 - `mise`
-- the `openidea-plugin` CLI from OpenIDEA v0.1.45
+- the `openidea-plugin` CLI from OpenIDEA v0.1.47
 
 Common commands:
 
@@ -121,7 +143,11 @@ before invoking these tasks.
   choose Mise explicitly under Settings › Run Targets or a configuration's
   **Run on** selector.
 - A selected plugin Run Target cannot be used for Debug in the current
-  OpenIDEA Plugin API. Use Local machine for Debug.
+  OpenIDEA Plugin API. Use Local machine for a generated Mise task
+  configuration, then use Debug from the Run/Debug selector when that task has
+  a recognized or configured debugger. The Mise Tasks view has no Debug button;
+  this is intentional because a generic Mise shell task does not itself define
+  a language debugger.
 - Mise accepts TOML 1.1 multiline inline tables, but Taplo/Better TOML may
   still diagnose them with messages such as `expected new line`. Use
   **Alt+Enter → Mise: Convert multiline env to TOML 1.0-compatible keys**;
@@ -130,9 +156,9 @@ before invoking these tasks.
   Mise's TOML providers, so injected commands are never parsed again as a
   complete TOML document.
 
-See [the port plan](docs/openidea-mise-port-plan.md) for the staged feature and
-release roadmap. See [the release runbook](docs/releasing.md) for signing-key,
-GitHub Environment, and automatic Marketplace publication setup.
+Release notes are maintained in [CHANGELOG.md](CHANGELOG.md). See the [release
+runbook](docs/releasing.md) for signing-key, GitHub Environment, and automatic
+Marketplace publication details.
 
 ## Security
 

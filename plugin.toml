@@ -1,16 +1,17 @@
 id = "winlans.mise"
 name = "Mise"
-version = "0.1.1"
+version = "0.2.0"
 description = "Run mise tasks, inspect tools and environment, and execute project runs through mise."
 authors = ["winlans <winlans@outlook.com>"]
 homepage = "https://github.com/winlans/openidea-mise"
 license = "Apache-2.0"
-change-notes = "0.1.0 — first OpenIDEA port with tasks, tools, environment and run integration."
+change-notes = "0.2.0 — keep legacy Run Configurations alongside Launch Configurations, add task debugging metadata, improve hierarchy-aware tools and editor support."
 categories = ["tools"]
 icon = "icons/mise.svg"
-engines.openidea = "^1.8"
+engines.openidea = "^1.10"
 wasm = "dist/plugin.wasm"
 activation = [
+  "on-startup-finished",
   "on-view:mise",
   "on-command:*",
   "on-event:file-saved",

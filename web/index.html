@@ -43,6 +43,7 @@
       outline: 2px solid var(--openidea-focus-ring); outline-offset: 1px;
     }
     button:disabled { cursor: default; opacity: .6; }
+    .task-actions { display: flex; gap: 4px; justify-content: flex-end; }
     .tabs {
       display: flex; align-items: center; gap: 2px;
       min-height: var(--openidea-corner-inset-height, 0);
@@ -372,7 +373,7 @@
           [...(task.depends || []), ...(task.wait_for || [])].forEach(dep =>
             dependencies.append(make("span", "pill", dep))
           );
-          const action = make("td");
+          const action = make("td", "task-actions");
           const button = make("button", "run", "Run");
           button.type = "button";
           button.addEventListener("click", () => send({op: "runTask", task: task.name}));
